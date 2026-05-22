@@ -28,6 +28,7 @@ output/vudenc/plain_xsrf
 The mock provider is deterministic and works without an API key. It is meant for smoke-testing the pipeline.
 
 Accepted `samples.jsonl` records include provenance fields: `provider`, `model`, `prompt_sha256`, `seed`, `attempt`, `generated_at`, and `validation_summary`.
+Raw model responses are schema-checked before validation: commit message, vulnerable/fixed code, and vulnerable/fixed changed-line lists must be present with the expected types.
 
 ## Optional validation tools
 

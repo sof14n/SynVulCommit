@@ -15,9 +15,10 @@ from .spec_sampler import GenerationSpec
 
 
 class GenerationError(RuntimeError):
-    def __init__(self, message: str, *, reason: str = "generation_error") -> None:
+    def __init__(self, message: str, *, reason: str = "generation_error", field_path: str | None = None) -> None:
         super().__init__(message)
         self.reason = reason
+        self.field_path = field_path
 
 
 @dataclass
@@ -48,7 +49,7 @@ class Provider(Protocol):
 def generate_commit(provider_name: str, spec: GenerationSpec, prompt: str) -> GeneratedCommit:
     provider = get_provider(provider_name)
     raw = provider.generate(spec, prompt)
-    candidate = normalize_candidate(raw, provider.name)
+    candidate = normalize_candidate(raw, provider.name, spec=spec)
     if not candidate.badparts:
         candidate.badparts = infer_vulnerable_lines(spec, candidate.vulnerable_code)
     if not candidate.goodparts:
@@ -78,11 +79,8 @@ def provider_model_name(provider_name: str) -> str:
     return "<unknown>"
 
 
-def normalize_candidate(raw: dict[str, Any], provider_name: str) -> GeneratedCommit:
-    required = ("commit_message", "vulnerable_code", "fixed_code")
-    missing = [field for field in required if not str(raw.get(field, "")).strip()]
-    if missing:
-        raise GenerationError(f"provider returned missing fields: {', '.join(missing)}")
+def normalize_candidate(raw: dict[str, Any], provider_name: str, spec: GenerationSpec | None = None) -> GeneratedCommit:
+    validate_raw_candidate(raw, spec=spec)
 
     filename = str(raw.get("filename") or "app.py").strip()
     if not filename.endswith(".py"):
@@ -110,6 +108,72 @@ def normalize_candidate(raw: dict[str, Any], provider_name: str) -> GeneratedCom
         goodparts=goodparts,
         provider=provider_name,
         raw_response=raw,
+    )
+
+
+def validate_raw_candidate(raw: dict[str, Any], spec: GenerationSpec | None = None) -> None:
+    if not isinstance(raw, dict):
+        _schema_error("<root>", "provider output must be a JSON object")
+
+    for field in ("commit_message", "vulnerable_code", "fixed_code"):
+        _require_non_empty_string(raw, field)
+
+    if "filename" in raw:
+        _require_non_empty_string(raw, "filename")
+
+    _require_string_list(raw, "vulnerable_lines")
+    _require_string_list(raw, "fixed_lines")
+
+    if spec is not None:
+        _validate_expected_cwe(raw, spec)
+
+
+def _require_non_empty_string(raw: dict[str, Any], field: str) -> None:
+    if field not in raw:
+        _schema_error(field, "required field is missing")
+    value = raw[field]
+    if not isinstance(value, str):
+        _schema_error(field, f"expected non-empty string, got {type(value).__name__}")
+    if not value.strip():
+        _schema_error(field, "expected non-empty string")
+
+
+def _require_string_list(raw: dict[str, Any], field: str) -> None:
+    if field not in raw:
+        _schema_error(field, "required field is missing")
+    value = raw[field]
+    if not isinstance(value, list):
+        _schema_error(field, f"expected non-empty list of strings, got {type(value).__name__}")
+    if not value:
+        _schema_error(field, "expected non-empty list of strings")
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            _schema_error(f"{field}[{index}]", f"expected string, got {type(item).__name__}")
+        if not item.strip():
+            _schema_error(f"{field}[{index}]", "expected non-empty string")
+
+
+def _validate_expected_cwe(raw: dict[str, Any], spec: GenerationSpec) -> None:
+    expected = {
+        "cwe": spec.cwe.lower(),
+        "mode": spec.mode.lower(),
+        "cwe_key": spec.cwe_key.lower(),
+    }
+    for field, expected_value in expected.items():
+        if field not in raw or raw[field] in (None, ""):
+            continue
+        value = raw[field]
+        if not isinstance(value, str):
+            _schema_error(field, f"expected string, got {type(value).__name__}")
+        if value.strip().lower() != expected_value:
+            _schema_error(field, f"expected {expected_value}, got {value.strip().lower()}")
+
+
+def _schema_error(field_path: str, detail: str) -> None:
+    raise GenerationError(
+        f"schema validation failed at {field_path}: {detail}",
+        reason="schema_validation",
+        field_path=field_path,
     )
 
 

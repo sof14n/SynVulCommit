@@ -95,6 +95,7 @@ def main() -> int:
             except GenerationError as exc:
                 model = provider_model_name(args.provider)
                 reason = getattr(exc, "reason", "generation_error")
+                field_path = getattr(exc, "field_path", None)
                 print(
                     f"rejected generation provider={args.provider} model={model} "
                     f"cwe={spec.cwe} attempt={attempt} reason={reason}"
@@ -108,6 +109,7 @@ def main() -> int:
                         "provider": args.provider,
                         "model": model,
                         "reject_reason": [reason],
+                        "invalid_field": field_path,
                         "error": str(exc),
                     },
                 )
