@@ -95,6 +95,22 @@ python -m synvulcommit.export_vudenc --input output/samples.jsonl --out output/v
 
 The export writes the seven `plain_<mode>` files plus `metadata.jsonl`. Each metadata row links one exported sample to its `plain_file`, `row_index`, `repo`, and `commit_id`, and preserves provider/model/prompt-hash provenance without storing API keys, authorization headers, or endpoint URLs.
 
+## Verify a dataset
+
+Human-readable report:
+
+```powershell
+python -m synvulcommit.verify_dataset --input output/samples.jsonl --rejected output/rejected.jsonl --vudenc output/vudenc
+```
+
+Machine-readable report for CI:
+
+```powershell
+python -m synvulcommit.verify_dataset --input output/samples.jsonl --rejected output/rejected.jsonl --vudenc output/vudenc --json
+```
+
+The verifier reports accepted/rejected counts, acceptance rate, average attempts, top rejection reasons, validation-tool findings, duplicate IDs, duplicate code fingerprints, missing required fields, and VUDENC export mismatches.
+
 ## Notes
 
 - This is teacher-generated synthetic supervision, not classic logit-based knowledge distillation.
