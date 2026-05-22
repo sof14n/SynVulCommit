@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  strict-mock-validation:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile package
+        run: python -m compileall synvulcommit
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run strict mock generation
+        run: |
+          python -m synvulcommit.run_generation \
+            --per-cwe 1 \
+            --provider mock \
+            --require-tools \
+            --output ci_output \
+            --no-export
+
+      - name: Assert accepted sample counts
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          samples_path = Path("ci_output/samples.jsonl")
+          samples = [
+              json.loads(line)
+              for line in samples_path.read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          expected_modes = {
+              "sql",
+              "command_injection",
+              "directory_traversal",
+              "open_redirect",
+              "remote_code_execution",
+              "xss",
+              "xsrf",
+          }
+          counts = Counter(sample.get("mode") for sample in samples)
+          if len(samples) != 7:
+              raise SystemExit(f"expected exactly 7 accepted samples, got {len(samples)}")
+          if set(counts) != expected_modes:
+              raise SystemExit(f"accepted modes mismatch: {dict(sorted(counts.items()))}")
+          bad_counts = {mode: count for mode, count in counts.items() if count != 1}
+          if bad_counts:
+              raise SystemExit(f"expected one sample per mode, got {bad_counts}")
+          print("accepted sample counts are valid")
+          PY
+
+      - name: Export VUDENC files
+        run: python -m synvulcommit.export_vudenc --input ci_output/samples.jsonl --out ci_output/vudenc
+
+      - name: Assert VUDENC export files
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          export_dir = Path("ci_output/vudenc")
+          expected_files = [
+              "plain_sql",
+              "plain_command_injection",
+              "plain_directory_traversal",
+              "plain_open_redirect",
+              "plain_remote_code_execution",
+              "plain_xss",
+              "plain_xsrf",
+          ]
+          missing = [name for name in expected_files if not (export_dir / name).is_file()]
+          if missing:
+              raise SystemExit(f"missing VUDENC files: {missing}")
+          for name in expected_files:
+              data = json.loads((export_dir / name).read_text(encoding="utf-8"))
+              count = sum(len(commits) for commits in data.values() if isinstance(commits, dict))
+              if count != 1:
+                  raise SystemExit(f"expected one exported sample in {name}, got {count}")
+          metadata_rows = [
+              line
+              for line in (export_dir / "metadata.jsonl").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          if len(metadata_rows) != 7:
+              raise SystemExit(f"expected 7 metadata rows, got {len(metadata_rows)}")
+          print("VUDENC export files are valid")
+          PY
+
+      - name: Verify dataset integrity
+        run: |
+          python -m synvulcommit.verify_dataset \
+            --input ci_output/samples.jsonl \
+            --rejected ci_output/rejected.jsonl \
+            --vudenc ci_output/vudenc \
+            --json
