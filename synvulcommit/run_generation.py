@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,8 @@ def main() -> int:
                     spec=spec,
                     candidate=candidate,
                     model=provider_model_name(args.provider),
+                    prompt_sha256=_sha256_text(prompt),
+                    seed=args.seed,
                     validation=validation.to_dict(),
                     attempt=attempt,
                 )
@@ -126,6 +130,8 @@ def _build_record(
     spec: GenerationSpec,
     candidate: Any,
     model: str,
+    prompt_sha256: str,
+    seed: int,
     validation: dict[str, Any],
     attempt: int,
 ) -> dict[str, Any]:
@@ -136,6 +142,9 @@ def _build_record(
         "mode": spec.mode,
         "context": spec.to_dict(),
         "attempt": attempt,
+        "seed": seed,
+        "generated_at": _utc_now(),
+        "prompt_sha256": prompt_sha256,
         "commit_message": candidate.commit_message,
         "filename": candidate.filename,
         "vulnerable_code": candidate.vulnerable_code,
@@ -146,6 +155,7 @@ def _build_record(
         "provider": candidate.provider,
         "model": model,
         "validation": validation,
+        "validation_summary": _validation_summary(validation),
     }
 
 
@@ -164,6 +174,24 @@ def validate_production_settings(provider: str, require_tools: bool, production:
             return "production mode requires SYNVUL_LOCAL_MODEL for provider/model metadata."
         return "production mode requires provider/model metadata."
     return None
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _validation_summary(validation: dict[str, Any]) -> dict[str, Any]:
+    tool_results = validation.get("tool_results", {})
+    return {
+        "passed": bool(validation.get("passed")),
+        "reason_count": len(validation.get("reasons") or []),
+        "bandit_findings": len(tool_results.get("bandit", {}).get("findings") or []),
+        "semgrep_findings": len(tool_results.get("semgrep", {}).get("findings") or []),
+    }
 
 
 if __name__ == "__main__":

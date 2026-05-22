@@ -15,6 +15,7 @@ Outputs:
 ```text
 output/samples.jsonl
 output/rejected.jsonl
+output/vudenc/metadata.jsonl
 output/vudenc/plain_sql
 output/vudenc/plain_command_injection
 output/vudenc/plain_directory_traversal
@@ -25,6 +26,8 @@ output/vudenc/plain_xsrf
 ```
 
 The mock provider is deterministic and works without an API key. It is meant for smoke-testing the pipeline.
+
+Accepted `samples.jsonl` records include provenance fields: `provider`, `model`, `prompt_sha256`, `seed`, `attempt`, `generated_at`, and `validation_summary`.
 
 ## Optional validation tools
 
@@ -83,6 +86,8 @@ By default, the local provider sends `format=json`, `temperature=0.2`, `num_pred
 ```powershell
 python -m synvulcommit.export_vudenc --input output/samples.jsonl --out output/vudenc
 ```
+
+The export writes the seven `plain_<mode>` files plus `metadata.jsonl`. Each metadata row links one exported sample to its `plain_file`, `row_index`, `repo`, and `commit_id`, and preserves provider/model/prompt-hash provenance without storing API keys, authorization headers, or endpoint URLs.
 
 ## Notes
 

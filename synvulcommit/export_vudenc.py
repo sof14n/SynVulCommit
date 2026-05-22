@@ -13,11 +13,15 @@ from .storage import read_jsonl
 def export_records(records: list[dict[str, Any]], out_dir: Path) -> dict[str, int]:
     out_dir.mkdir(parents=True, exist_ok=True)
     by_mode: dict[str, dict[str, dict[str, Any]]] = {definition.mode: {} for definition in all_cwes()}
+    metadata_rows: list[dict[str, Any]] = []
+    row_counts: dict[str, int] = {}
 
     for record in records:
         mode = str(record.get("mode") or record.get("context", {}).get("mode", "unknown"))
         if mode not in by_mode:
             by_mode[mode] = {}
+        row_counts[mode] = row_counts.get(mode, 0) + 1
+        row_index = row_counts[mode]
         repo_name = f"synvulcommit/{mode}"
         commit_id = str(record.get("id", f"sample_{len(by_mode[mode]) + 1:06d}"))
         filename = str(record.get("filename", "app.py"))
@@ -36,6 +40,7 @@ def export_records(records: list[dict[str, Any]], out_dir: Path) -> dict[str, in
                 "cwe_name": record.get("cwe_name"),
                 "context": record.get("context", {}),
                 "validation": record.get("validation", {}),
+                "provenance": _provenance(record),
             },
             "files": {
                 filename: {
@@ -55,6 +60,21 @@ def export_records(records: list[dict[str, Any]], out_dir: Path) -> dict[str, in
                 }
             },
         }
+        metadata_rows.append(
+            {
+                "id": record.get("id"),
+                "cwe": record.get("cwe"),
+                "cwe_name": record.get("cwe_name"),
+                "mode": mode,
+                "plain_file": f"plain_{mode}",
+                "row_index": row_index,
+                "repo": repo_name,
+                "commit_id": commit_id,
+                "filename": filename,
+                "provenance": _provenance(record),
+                "validation_summary": record.get("validation_summary") or _validation_summary(record.get("validation", {})),
+            }
+        )
 
     counts: dict[str, int] = {}
     for definition in all_cwes():
@@ -63,7 +83,34 @@ def export_records(records: list[dict[str, Any]], out_dir: Path) -> dict[str, in
         data = by_mode.get(mode, {})
         counts[mode] = sum(len(commits) for commits in data.values())
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    metadata_path = out_dir / "metadata.jsonl"
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        for row in metadata_rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
     return counts
+
+
+def _provenance(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": record.get("provider"),
+        "model": record.get("model"),
+        "prompt_sha256": record.get("prompt_sha256"),
+        "seed": record.get("seed"),
+        "attempt": record.get("attempt"),
+        "generated_at": record.get("generated_at"),
+    }
+
+
+def _validation_summary(validation: Any) -> dict[str, Any]:
+    if not isinstance(validation, dict):
+        return {"passed": False, "reason_count": 0, "bandit_findings": 0, "semgrep_findings": 0}
+    tool_results = validation.get("tool_results", {})
+    return {
+        "passed": bool(validation.get("passed")),
+        "reason_count": len(validation.get("reasons") or []),
+        "bandit_findings": len(tool_results.get("bandit", {}).get("findings") or []),
+        "semgrep_findings": len(tool_results.get("semgrep", {}).get("findings") or []),
+    }
 
 
 def main() -> int:

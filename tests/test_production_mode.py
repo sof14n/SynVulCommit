@@ -48,12 +48,18 @@ class ProductionModeTests(unittest.TestCase):
             spec=spec,
             candidate=candidate,
             model="deepseek-r1:1.5b",
+            prompt_sha256="0" * 64,
+            seed=1337,
             validation={"passed": True},
             attempt=1,
         )
 
         self.assertEqual("local_http", record["provider"])
         self.assertEqual("deepseek-r1:1.5b", record["model"])
+        self.assertEqual("0" * 64, record["prompt_sha256"])
+        self.assertEqual(1337, record["seed"])
+        self.assertIn("generated_at", record)
+        self.assertEqual({"passed": True, "reason_count": 0, "bandit_findings": 0, "semgrep_findings": 0}, record["validation_summary"])
 
 
 if __name__ == "__main__":
