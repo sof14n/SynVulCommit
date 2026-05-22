@@ -6,7 +6,7 @@ from typing import Any
 
 from .diversity import DiversityIndex
 from .export_vudenc import export_records
-from .llm_generator import GenerationError, generate_commit
+from .llm_generator import GenerationError, generate_commit, provider_model_name
 from .prompt_builder import build_prompt
 from .spec_sampler import GenerationSpec, iter_specs
 from .storage import append_jsonl, ensure_output_files, next_sample_id, read_jsonl
@@ -82,13 +82,22 @@ def main() -> int:
                 print(f"accepted {record['id']} ({spec.cwe} {spec.mode})")
                 break
             except GenerationError as exc:
+                model = provider_model_name(args.provider)
+                reason = getattr(exc, "reason", "generation_error")
+                print(
+                    f"rejected generation provider={args.provider} model={model} "
+                    f"cwe={spec.cwe} attempt={attempt} reason={reason}"
+                )
                 append_jsonl(
                     rejected_path,
                     {
                         "context": spec.to_dict(),
+                        "cwe": spec.cwe,
                         "attempt": attempt,
                         "provider": args.provider,
-                        "reject_reason": [str(exc)],
+                        "model": model,
+                        "reject_reason": [reason],
+                        "error": str(exc),
                     },
                 )
                 rejected += 1

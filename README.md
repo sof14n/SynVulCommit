@@ -64,7 +64,9 @@ python -m synvulcommit.run_generation --per-cwe 10 --provider local_http
 ```
 
 The response parser accepts common shapes such as OpenAI `choices`, Ollama-style `response`, and simple `text` or `generated_text` fields.
-By default, the local provider sends `format=json`, `temperature=0.2`, and `num_predict=4096`, which works well with Ollama. Set `SYNVUL_LOCAL_FORMAT=""` if your local endpoint does not accept that field.
+It strips reasoning-model `<think>...</think>` blocks and parses the final JSON object, so thinking text is not written to accepted or rejected dataset files.
+For Ollama reasoning models, the API may return reasoning in a separate `thinking` field; SynVulCommit ignores that field and parses only the final response text.
+By default, the local provider sends `format=json`, `temperature=0.2`, `num_predict=4096`, and uses a 300-second HTTP timeout, which works well with Ollama. Set `SYNVUL_LOCAL_FORMAT=""` if your local endpoint does not accept that field, or set `SYNVUL_HTTP_TIMEOUT` for slower local models.
 
 ## Export only
 
@@ -77,4 +79,4 @@ python -m synvulcommit.export_vudenc --input output/samples.jsonl --out output/v
 - This is teacher-generated synthetic supervision, not classic logit-based knowledge distillation.
 - The AI generates candidates; the pipeline validates and stores only accepted samples.
 - Use `--require-tools` for strict runs that require Bandit and Semgrep to execute successfully.
-- Thinking/reasoning models may emit chain-of-thought before the JSON object. Prefer non-thinking mode or add output filtering before production-scale generation.
+- Thinking/reasoning model output is sanitized before JSON parsing, but production runs should still prefer JSON/structured-output modes when the provider supports them.

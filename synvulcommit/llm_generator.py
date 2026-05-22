@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -14,7 +15,9 @@ from .spec_sampler import GenerationSpec
 
 
 class GenerationError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, reason: str = "generation_error") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -64,6 +67,17 @@ def get_provider(provider_name: str) -> Provider:
     raise GenerationError(f"unknown provider '{provider_name}'. Use mock, openai_compatible, or local_http.")
 
 
+def provider_model_name(provider_name: str) -> str:
+    normalized = provider_name.lower().strip()
+    if normalized == "mock":
+        return "mock"
+    if normalized == "openai_compatible":
+        return os.environ.get("SYNVUL_MODEL", "<unset>")
+    if normalized == "local_http":
+        return os.environ.get("SYNVUL_LOCAL_MODEL", "<unset>")
+    return "<unknown>"
+
+
 def normalize_candidate(raw: dict[str, Any], provider_name: str) -> GeneratedCommit:
     required = ("commit_message", "vulnerable_code", "fixed_code")
     missing = [field for field in required if not str(raw.get(field, "")).strip()]
@@ -100,20 +114,128 @@ def normalize_candidate(raw: dict[str, Any], provider_name: str) -> GeneratedCom
 
 
 def parse_candidate_text(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
+    cleaned = strip_reasoning_text(text)
+    candidates = _json_object_candidates(cleaned)
+    if not candidates:
+        raise GenerationError("provider returned no valid JSON object", reason="no_valid_json")
+
+    decode_errors: list[json.JSONDecodeError] = []
+    fallback: dict[str, Any] | None = None
+    for candidate in reversed(candidates):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            decode_errors.append(exc)
+            continue
+        if isinstance(parsed, dict):
+            if _looks_like_generated_commit(parsed):
+                return parsed
+            if fallback is None:
+                fallback = parsed
+
+    if fallback is not None:
+        return fallback
+
+    if decode_errors:
+        raise GenerationError("provider returned malformed JSON object", reason="json_parse_error") from decode_errors[-1]
+    raise GenerationError("provider returned no JSON object", reason="no_valid_json")
+
+
+def strip_reasoning_text(text: str) -> str:
+    cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.strip()
     cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(cleaned[start : end + 1])
-            except json.JSONDecodeError as exc:
-                raise GenerationError(f"provider returned malformed JSON: {exc}; preview={cleaned[:500]!r}") from exc
-        raise GenerationError(f"provider returned no JSON object; preview={cleaned[:500]!r}")
+    return cleaned
+
+
+def _json_object_candidates(text: str) -> list[str]:
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+            continue
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append((start, index + 1))
+                start = None
+
+    if not spans:
+        spans = _recover_json_object_spans(text)
+    return [text[start:end].strip() for start, end in _unique_spans(spans)]
+
+
+def _recover_json_object_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        end = _find_json_object_end(text, start)
+        if end is not None:
+            spans.append((start, end))
+    return spans
+
+
+def _find_json_object_end(text: str, start: int) -> int | None:
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _unique_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    seen: set[tuple[int, int]] = set()
+    result: list[tuple[int, int]] = []
+    for span in spans:
+        if span in seen:
+            continue
+        seen.add(span)
+        result.append(span)
+    return result
+
+
+def _looks_like_generated_commit(value: dict[str, Any]) -> bool:
+    required = ("commit_message", "vulnerable_code", "fixed_code")
+    return all(key in value for key in required)
 
 
 def _normalize_code(code: str) -> str:
@@ -264,6 +386,7 @@ class LocalHTTPProvider:
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+    timeout = float(os.environ.get("SYNVUL_HTTP_TIMEOUT", "300"))
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -271,11 +394,13 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise GenerationError(f"provider HTTP {exc.code}: {body[:500]}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise GenerationError(f"provider request timed out after {timeout:g}s", reason="provider_timeout") from exc
     except urllib.error.URLError as exc:
         raise GenerationError(f"provider request failed: {exc}") from exc
     try:
