@@ -84,7 +84,9 @@ class ResumeGenerationTests(unittest.TestCase):
         accepted, reason = diversity.accepts(duplicate)
 
         self.assertFalse(accepted)
-        self.assertEqual("duplicate vulnerable_code hash", reason)
+        self.assertEqual("duplicate code pair hash", reason)
+        self.assertEqual("exact_code_pair", diversity.last_rejection["check"])
+        self.assertEqual("CWE-89_sql_000001", diversity.last_rejection["matched_id"])
 
 
 def _record(mode: str, cwe: str, index: int) -> dict[str, object]:

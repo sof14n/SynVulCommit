@@ -15,6 +15,7 @@ Outputs:
 ```text
 output/samples.jsonl
 output/rejected.jsonl
+output/diversity_summary.json
 output/vudenc/metadata.jsonl
 output/vudenc/plain_sql
 output/vudenc/plain_command_injection
@@ -55,6 +56,8 @@ python -m synvulcommit.run_generation --production --require-tools --per-cwe 10 
 Production mode refuses `--provider mock`, requires `--require-tools`, and requires model metadata through `SYNVUL_MODEL` for `openai_compatible` or `SYNVUL_LOCAL_MODEL` for `local_http`.
 
 For resumable scale runs, use `--target-per-cwe N`. The generator counts existing accepted rows in `samples.jsonl`, skips CWEs already at the target, appends only missing samples, and prints per-CWE existing/planned/accepted/rejected/remaining counts.
+
+The diversity filter rejects exact code-pair duplicates, matching normalized vulnerable/fixed AST fingerprints, and same-CWE near duplicates using token-shingle Jaccard similarity at `0.90`. Duplicate rejections include matched sample details, and `diversity_summary.json` records distributions by CWE, app type, flow pattern, difficulty, and structure.
 
 ## OpenAI-compatible provider
 

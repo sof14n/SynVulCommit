@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .cwe_registry import all_cwes
-from .diversity import DiversityIndex
+from .diversity import DiversityIndex, write_diversity_summary
 from .export_vudenc import export_records
 from .llm_generator import GenerationError, generate_commit, provider_model_name
 from .prompt_builder import build_prompt
@@ -93,7 +93,10 @@ def main() -> int:
 
                 diverse, reason = diversity.accepts(record)
                 if not diverse:
-                    append_jsonl(rejected_path, {**record, "reject_reason": [reason]})
+                    append_jsonl(
+                        rejected_path,
+                        {**record, "reject_reason": [reason], "diversity_rejection": diversity.last_rejection or {}},
+                    )
                     rejected += 1
                     run_stats[spec.mode]["rejected"] += 1
                     continue
@@ -133,6 +136,9 @@ def main() -> int:
             print(f"failed to accept {spec.cwe} {spec.mode} after {args.max_attempts} attempts")
 
     print_run_summary(run_stats, target_per_cwe=args.target_per_cwe)
+    diversity_summary_path = output_dir / "diversity_summary.json"
+    write_diversity_summary(diversity.summary(), diversity_summary_path)
+    print(f"wrote diversity summary to {diversity_summary_path}")
 
     if not args.no_export:
         counts = export_records(read_jsonl(samples_path), output_dir / "vudenc")
