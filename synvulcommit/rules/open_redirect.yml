@@ -1,0 +1,10 @@
+rules:
+  - id: synvul.cwe-601.open-redirect
+    message: Redirect target is controlled by request data.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern-regex: 'redirect\s*\(\s*request\.(args|form)\.get'
+          - pattern-regex: 'redirect\s*\(\s*(target|next_url|next|url)\s*\)'
+      - pattern-not-regex: '(urlparse|netloc|scheme|allowed|startswith\s*\()'

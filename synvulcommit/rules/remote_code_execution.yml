@@ -1,0 +1,10 @@
+rules:
+  - id: synvul.cwe-94.remote-code-execution
+    message: Dynamic Python code execution can lead to remote code execution.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+          - pattern: compile(...)

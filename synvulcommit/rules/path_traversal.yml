@@ -1,0 +1,28 @@
+rules:
+  - id: synvul.cwe-22.path-traversal
+    message: User-controlled path is opened without containment checks.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: os.path.join(...)
+      - pattern: $PATH = os.path.join(...)
+      - pattern: open(os.path.join($BASE, request.args.get(...)), ...)
+      - pattern: send_file(os.path.join($BASE, request.args.get(...)), ...)
+      - pattern: |
+          $NAME = request.args.get(...)
+          ...
+          $PATH = os.path.join($BASE, $NAME)
+          ...
+          open($PATH, ...)
+      - pattern: |
+          $NAME = request.form.get(...)
+          ...
+          $PATH = os.path.join($BASE, $NAME)
+          ...
+          open($PATH, ...)
+      - pattern: |
+          $NAME = input(...)
+          ...
+          $PATH = os.path.join($BASE, $NAME)
+          ...
+          open($PATH, ...)

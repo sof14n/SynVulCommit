@@ -1,0 +1,10 @@
+rules:
+  - id: synvul.cwe-78.command-injection
+    message: User-controlled data may reach shell command execution.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FUNC(..., shell=True, ...)
+          - pattern: os.system(...)
+          - pattern: subprocess.getoutput(...)

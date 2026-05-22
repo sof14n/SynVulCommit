@@ -1,0 +1,22 @@
+rules:
+  - id: synvul.cwe-89.sql-injection
+    message: Possible SQL injection through dynamic query construction.
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: $CUR.execute(f"...")
+      - pattern: $CUR.executemany(f"...")
+      - pattern: $CUR.execute("..." % $VALUE)
+      - pattern: $CUR.execute("..." + $VALUE)
+      - pattern: |
+          $QUERY = f"..."
+          ...
+          $CUR.execute($QUERY)
+      - pattern: |
+          $QUERY = "..." + $VALUE
+          ...
+          $CUR.execute($QUERY)
+      - pattern: |
+          $QUERY = "..." % $VALUE
+          ...
+          $CUR.execute($QUERY)

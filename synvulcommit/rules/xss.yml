@@ -1,0 +1,6 @@
+rules:
+  - id: synvul.cwe-79.xss
+    message: User-controlled data is rendered into HTML without escaping.
+    severity: WARNING
+    languages: [python]
+    pattern-regex: 'render_template_string\s*\([^)]*(\+|%|\.format\(|Markup\()'
