@@ -40,6 +40,16 @@ Use strict external-tool validation when you want missing Bandit/Semgrep to fail
 python -m synvulcommit.run_generation --per-cwe 1 --provider mock --require-tools
 ```
 
+## Production mode
+
+Use production mode for real dataset generation:
+
+```powershell
+python -m synvulcommit.run_generation --production --require-tools --per-cwe 10 --provider local_http
+```
+
+Production mode refuses `--provider mock`, requires `--require-tools`, and requires model metadata through `SYNVUL_MODEL` for `openai_compatible` or `SYNVUL_LOCAL_MODEL` for `local_http`.
+
 ## OpenAI-compatible provider
 
 Any chat-completions-compatible endpoint can be used:

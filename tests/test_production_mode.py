@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+from synvulcommit.run_generation import _build_record, validate_production_settings
+
+
+class ProductionModeTests(unittest.TestCase):
+    def test_production_refuses_mock_provider(self) -> None:
+        error = validate_production_settings(provider="mock", require_tools=True, production=True)
+
+        self.assertIsNotNone(error)
+        self.assertIn("--provider mock", error or "")
+        self.assertIn("--provider openai_compatible", error or "")
+
+    def test_production_requires_strict_validation_tools(self) -> None:
+        error = validate_production_settings(provider="local_http", require_tools=False, production=True)
+
+        self.assertIsNotNone(error)
+        self.assertIn("--require-tools", error or "")
+        self.assertIn("Bandit", error or "")
+        self.assertIn("Semgrep", error or "")
+
+    def test_non_production_keeps_demo_settings_available(self) -> None:
+        self.assertIsNone(validate_production_settings(provider="mock", require_tools=False, production=False))
+
+    def test_record_includes_provider_model_metadata(self) -> None:
+        spec = SimpleNamespace(
+            cwe="CWE-78",
+            cwe_name="Command Injection",
+            mode="command_injection",
+            to_dict=lambda: {"cwe": "CWE-78", "mode": "command_injection"},
+        )
+        candidate = SimpleNamespace(
+            commit_message="Fix command injection",
+            filename="app.py",
+            vulnerable_code="import os\nos.system(user_input)\n",
+            fixed_code="import subprocess\nsubprocess.run(['echo', user_input], shell=False)\n",
+            diff="--- a/app.py\n+++ b/app.py\n",
+            badparts=["os.system(user_input)"],
+            goodparts=["subprocess.run(['echo', user_input], shell=False)"],
+            provider="local_http",
+        )
+
+        record = _build_record(
+            sample_id="CWE-78_command_injection_000001",
+            spec=spec,
+            candidate=candidate,
+            model="deepseek-r1:1.5b",
+            validation={"passed": True},
+            attempt=1,
+        )
+
+        self.assertEqual("local_http", record["provider"])
+        self.assertEqual("deepseek-r1:1.5b", record["model"])
+
+
+if __name__ == "__main__":
+    unittest.main()

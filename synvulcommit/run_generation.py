@@ -22,8 +22,14 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=5, help="Generation attempts per requested spec.")
     parser.add_argument("--cwe", action="append", help="Limit generation to one or more CWE keys/modes, e.g. --cwe xsrf --cwe sql.")
     parser.add_argument("--require-tools", action="store_true", help="Fail validation if Bandit or Semgrep is missing.")
+    parser.add_argument("--production", action="store_true", help="Enable guardrails for real dataset generation.")
     parser.add_argument("--no-export", action="store_true", help="Do not export VUDENC-style files after generation.")
     args = parser.parse_args()
+
+    production_error = validate_production_settings(args.provider, args.require_tools, args.production)
+    if production_error:
+        print(production_error)
+        return 2
 
     output_dir = Path(args.output)
     samples_path, rejected_path = ensure_output_files(output_dir)
@@ -60,6 +66,7 @@ def main() -> int:
                     sample_id=next_sample_id(existing_records, spec.cwe, spec.mode),
                     spec=spec,
                     candidate=candidate,
+                    model=provider_model_name(args.provider),
                     validation=validation.to_dict(),
                     attempt=attempt,
                 )
@@ -118,6 +125,7 @@ def _build_record(
     sample_id: str,
     spec: GenerationSpec,
     candidate: Any,
+    model: str,
     validation: dict[str, Any],
     attempt: int,
 ) -> dict[str, Any]:
@@ -136,8 +144,26 @@ def _build_record(
         "badparts": candidate.badparts,
         "goodparts": candidate.goodparts,
         "provider": candidate.provider,
+        "model": model,
         "validation": validation,
     }
+
+
+def validate_production_settings(provider: str, require_tools: bool, production: bool) -> str | None:
+    if not production:
+        return None
+    if provider == "mock":
+        return "production mode refuses --provider mock; use --provider openai_compatible or --provider local_http."
+    if not require_tools:
+        return "production mode requires --require-tools so Bandit and Semgrep must run."
+    model = provider_model_name(provider)
+    if not model or model == "<unset>":
+        if provider == "openai_compatible":
+            return "production mode requires SYNVUL_MODEL for provider/model metadata."
+        if provider == "local_http":
+            return "production mode requires SYNVUL_LOCAL_MODEL for provider/model metadata."
+        return "production mode requires provider/model metadata."
+    return None
 
 
 if __name__ == "__main__":
