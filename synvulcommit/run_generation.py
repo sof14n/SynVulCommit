@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .cwe_registry import all_cwes
 from .diversity import DiversityIndex
 from .export_vudenc import export_records
 from .llm_generator import GenerationError, generate_commit, provider_model_name
 from .prompt_builder import build_prompt
-from .spec_sampler import GenerationSpec, iter_specs
+from .spec_sampler import GenerationSpec, iter_specs, make_spec
 from .storage import append_jsonl, ensure_output_files, next_sample_id, read_jsonl
 from .validator import validate_candidate
 
@@ -18,6 +20,7 @@ from .validator import validate_candidate
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate validated synthetic Python vulnerability-fix commits.")
     parser.add_argument("--per-cwe", type=int, default=1, help="Accepted samples to generate per CWE.")
+    parser.add_argument("--target-per-cwe", type=int, help="Resume until each selected CWE has this many accepted samples.")
     parser.add_argument("--provider", default="mock", choices=("mock", "openai_compatible", "local_http"))
     parser.add_argument("--output", default="output", help="Output directory.")
     parser.add_argument("--seed", type=int, default=1337, help="Random seed for task sampling.")
@@ -44,13 +47,20 @@ def main() -> int:
 
     accepted = 0
     rejected = 0
-    specs = iter_specs(args.per_cwe, seed=args.seed)
-    if args.cwe:
-        wanted = {value.lower().strip() for value in args.cwe}
-        specs = [spec for spec in specs if spec.cwe_key in wanted or spec.mode in wanted or spec.cwe.lower() in wanted]
-        if not specs:
-            print(f"no specs matched --cwe values: {', '.join(args.cwe)}")
-            return 2
+    plan = build_generation_plan(
+        per_cwe=args.per_cwe,
+        target_per_cwe=args.target_per_cwe,
+        existing_records=existing_records,
+        seed=args.seed,
+        cwe_filters=args.cwe,
+    )
+    if not plan["matched"]:
+        print(f"no specs matched --cwe values: {', '.join(args.cwe or [])}")
+        return 2
+    specs = plan["specs"]
+    run_stats = plan["stats"]
+    if args.target_per_cwe is not None and not specs:
+        print(f"all selected CWEs already have at least {args.target_per_cwe} accepted samples")
     for spec in specs:
         accepted_for_spec = False
         for attempt in range(1, args.max_attempts + 1):
@@ -78,17 +88,20 @@ def main() -> int:
                 if not validation.passed:
                     append_jsonl(rejected_path, {**record, "reject_reason": validation.reasons})
                     rejected += 1
+                    run_stats[spec.mode]["rejected"] += 1
                     continue
 
                 diverse, reason = diversity.accepts(record)
                 if not diverse:
                     append_jsonl(rejected_path, {**record, "reject_reason": [reason]})
                     rejected += 1
+                    run_stats[spec.mode]["rejected"] += 1
                     continue
 
                 append_jsonl(samples_path, record)
                 existing_records.append(record)
                 accepted += 1
+                run_stats[spec.mode]["accepted"] += 1
                 accepted_for_spec = True
                 print(f"accepted {record['id']} ({spec.cwe} {spec.mode})")
                 break
@@ -114,9 +127,12 @@ def main() -> int:
                     },
                 )
                 rejected += 1
+                run_stats[spec.mode]["rejected"] += 1
 
         if not accepted_for_spec:
             print(f"failed to accept {spec.cwe} {spec.mode} after {args.max_attempts} attempts")
+
+    print_run_summary(run_stats, target_per_cwe=args.target_per_cwe)
 
     if not args.no_export:
         counts = export_records(read_jsonl(samples_path), output_dir / "vudenc")
@@ -125,6 +141,79 @@ def main() -> int:
 
     print(f"done: accepted={accepted}, rejected={rejected}, samples={samples_path}, rejected_log={rejected_path}")
     return 0
+
+
+def build_generation_plan(
+    per_cwe: int,
+    target_per_cwe: int | None,
+    existing_records: list[dict[str, Any]],
+    seed: int,
+    cwe_filters: list[str] | None = None,
+) -> dict[str, Any]:
+    existing_by_mode = count_existing_by_mode(existing_records)
+    wanted = {value.lower().strip() for value in cwe_filters or []}
+    selected = [
+        definition
+        for definition in all_cwes()
+        if not wanted or definition.key in wanted or definition.mode in wanted or definition.cwe.lower() in wanted
+    ]
+    if cwe_filters and not selected:
+        return {"matched": False, "specs": [], "stats": {}}
+
+    stats = {
+        definition.mode: {
+            "cwe": definition.cwe,
+            "existing": existing_by_mode.get(definition.mode, 0),
+            "target": target_per_cwe,
+            "planned": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "remaining": 0,
+        }
+        for definition in selected
+    }
+
+    if target_per_cwe is None:
+        specs = [spec for spec in iter_specs(per_cwe, seed=seed) if spec.mode in stats]
+        for spec in specs:
+            stats[spec.mode]["planned"] += 1
+        return {"matched": True, "specs": specs, "stats": stats}
+
+    rng = random.Random(seed)
+    specs: list[GenerationSpec] = []
+    for definition in selected:
+        existing = existing_by_mode.get(definition.mode, 0)
+        needed = max(target_per_cwe - existing, 0)
+        stats[definition.mode]["planned"] = needed
+        stats[definition.mode]["remaining"] = needed
+        for offset in range(needed):
+            specs.append(make_spec(definition, existing + offset, rng))
+    rng.shuffle(specs)
+    return {"matched": True, "specs": specs, "stats": stats}
+
+
+def count_existing_by_mode(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        mode = str(record.get("mode") or record.get("context", {}).get("mode", ""))
+        if mode:
+            counts[mode] = counts.get(mode, 0) + 1
+    return counts
+
+
+def print_run_summary(stats: dict[str, dict[str, Any]], target_per_cwe: int | None) -> None:
+    if not stats:
+        return
+    print("run summary:")
+    for mode in sorted(stats):
+        item = stats[mode]
+        remaining = item["remaining"]
+        if target_per_cwe is not None:
+            remaining = max(int(item["target"]) - int(item["existing"]) - int(item["accepted"]), 0)
+        print(
+            f"  {item['cwe']} {mode}: existing={item['existing']} planned={item['planned']} "
+            f"accepted={item['accepted']} rejected={item['rejected']} remaining={remaining}"
+        )
 
 
 def _build_record(

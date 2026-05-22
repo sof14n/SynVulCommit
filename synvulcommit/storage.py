@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -38,5 +39,10 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def next_sample_id(records: list[dict[str, Any]], cwe: str, mode: str) -> str:
     prefix = f"{cwe}_{mode}_"
-    count = sum(1 for record in records if str(record.get("id", "")).startswith(prefix))
-    return f"{prefix}{count + 1:06d}"
+    max_suffix = 0
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    for record in records:
+        match = pattern.match(str(record.get("id", "")))
+        if match:
+            max_suffix = max(max_suffix, int(match.group(1)))
+    return f"{prefix}{max_suffix + 1:06d}"

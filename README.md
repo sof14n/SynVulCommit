@@ -54,6 +54,8 @@ python -m synvulcommit.run_generation --production --require-tools --per-cwe 10 
 
 Production mode refuses `--provider mock`, requires `--require-tools`, and requires model metadata through `SYNVUL_MODEL` for `openai_compatible` or `SYNVUL_LOCAL_MODEL` for `local_http`.
 
+For resumable scale runs, use `--target-per-cwe N`. The generator counts existing accepted rows in `samples.jsonl`, skips CWEs already at the target, appends only missing samples, and prints per-CWE existing/planned/accepted/rejected/remaining counts.
+
 ## OpenAI-compatible provider
 
 Any chat-completions-compatible endpoint can be used:
