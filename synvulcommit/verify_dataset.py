@@ -120,16 +120,29 @@ def _validation_tool_findings(samples: list[dict[str, Any]]) -> dict[str, int]:
         validation = record.get("validation", {})
         if not isinstance(validation, dict):
             continue
-        tool_results = validation.get("tool_results", {})
-        if not isinstance(tool_results, dict):
-            continue
         for tool_name in totals:
-            tool_result = tool_results.get(tool_name, {})
-            if isinstance(tool_result, dict):
-                findings = tool_result.get("findings", [])
-                if isinstance(findings, list):
-                    totals[tool_name] += len(findings)
+            totals[tool_name] += _tool_finding_count(validation, tool_name)
     return totals
+
+
+def _tool_finding_count(validation: dict[str, Any], tool_name: str) -> int:
+    legacy_tool_results = validation.get("tool_results", {})
+    if isinstance(legacy_tool_results, dict) and tool_name in legacy_tool_results:
+        legacy_result = legacy_tool_results.get(tool_name, {})
+        if isinstance(legacy_result, dict):
+            legacy_findings = legacy_result.get("findings", [])
+            if isinstance(legacy_findings, list):
+                return len(legacy_findings)
+
+    total = 0
+    for suffix in ("before", "after"):
+        result = validation.get(f"{tool_name}_{suffix}", {})
+        if not isinstance(result, dict):
+            continue
+        findings = result.get("findings", [])
+        if isinstance(findings, list):
+            total += len(findings)
+    return total
 
 
 def _duplicates(values: Any) -> list[str]:

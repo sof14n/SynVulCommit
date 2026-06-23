@@ -71,6 +71,17 @@ python -m synvulcommit.run_generation --per-cwe 10 --provider openai_compatible
 ```
 
 For OpenRouter or similar gateways, set `SYNVUL_BASE_URL` to the gateway's OpenAI-compatible base URL and `SYNVUL_MODEL` to the routed model name.
+By default, the request includes `response_format={"type":"json_object"}`. Set `SYNVUL_RESPONSE_FORMAT=""` if a gateway does not support JSON mode. Set `SYNVUL_MAX_TOKENS` to control the response length.
+
+DeepSeek can be used through the same provider:
+
+```powershell
+$env:SYNVUL_BASE_URL="https://api.deepseek.com"
+$env:SYNVUL_API_KEY="your_api_key"
+$env:SYNVUL_MODEL="deepseek-v4-flash"
+$env:SYNVUL_MAX_TOKENS="4096"
+python -m synvulcommit.run_generation --production --require-tools --target-per-cwe 11 --provider openai_compatible --cwe sql --cwe command_injection --cwe xss --max-attempts 20 --output output_3cwe_33
+```
 
 ## Local HTTP provider
 
@@ -117,3 +128,25 @@ The verifier reports accepted/rejected counts, acceptance rate, average attempts
 - The AI generates candidates; the pipeline validates and stores only accepted samples.
 - Use `--require-tools` for strict runs that require Bandit and Semgrep to execute successfully.
 - Thinking/reasoning model output is sanitized before JSON parsing, but production runs should still prefer JSON/structured-output modes when the provider supports them.
+
+## Evaluate against VUDENC
+
+The lightweight evaluation harness trains three comparable TF-IDF/logistic-regression classifiers for each selected vulnerability:
+
+- Model A: VUDENC train split only
+- Model B: SynVulCommit synthetic only
+- Model C: VUDENC train split plus SynVulCommit synthetic
+
+All three are evaluated on the same held-out VUDENC test split.
+
+```powershell
+python -m synvulcommit.evaluation.train_eval `
+  --vudenc-root ..\VulnerabilityDetection\Code\data `
+  --synthetic-root output_3cwe_33\vudenc `
+  --mode sql `
+  --mode command_injection `
+  --mode xss `
+  --output output_3cwe_33\evaluation
+```
+
+The command writes `metrics.json` and `dataset_summary.jsonl` to the output directory.

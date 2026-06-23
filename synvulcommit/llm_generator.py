@@ -412,6 +412,12 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": prompt},
             ],
         }
+        max_tokens = os.environ.get("SYNVUL_MAX_TOKENS")
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
+        response_format = os.environ.get("SYNVUL_RESPONSE_FORMAT", "json_object").strip()
+        if response_format:
+            payload["response_format"] = {"type": response_format}
         response = _post_json(url, payload, {"Authorization": f"Bearer {api_key}"})
         text = _extract_text(response)
         return parse_candidate_text(text)

@@ -104,13 +104,32 @@ def _provenance(record: dict[str, Any]) -> dict[str, Any]:
 def _validation_summary(validation: Any) -> dict[str, Any]:
     if not isinstance(validation, dict):
         return {"passed": False, "reason_count": 0, "bandit_findings": 0, "semgrep_findings": 0}
-    tool_results = validation.get("tool_results", {})
     return {
         "passed": bool(validation.get("passed")),
         "reason_count": len(validation.get("reasons") or []),
-        "bandit_findings": len(tool_results.get("bandit", {}).get("findings") or []),
-        "semgrep_findings": len(tool_results.get("semgrep", {}).get("findings") or []),
+        "bandit_findings": _tool_finding_count(validation, "bandit"),
+        "semgrep_findings": _tool_finding_count(validation, "semgrep"),
     }
+
+
+def _tool_finding_count(validation: dict[str, Any], tool_name: str) -> int:
+    legacy_tool_results = validation.get("tool_results", {})
+    if isinstance(legacy_tool_results, dict) and tool_name in legacy_tool_results:
+        legacy_result = legacy_tool_results.get(tool_name, {})
+        if isinstance(legacy_result, dict):
+            legacy_findings = legacy_result.get("findings", [])
+            if isinstance(legacy_findings, list):
+                return len(legacy_findings)
+
+    total = 0
+    for suffix in ("before", "after"):
+        result = validation.get(f"{tool_name}_{suffix}", {})
+        if not isinstance(result, dict):
+            continue
+        findings = result.get("findings", [])
+        if isinstance(findings, list):
+            total += len(findings)
+    return total
 
 
 def main() -> int:

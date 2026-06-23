@@ -161,7 +161,7 @@ def _run_command(
         return {"missing": False, "returncode": None, "stdout": exc.stdout or "", "error": "tool timed out"}
 
     stderr = completed.stderr.strip()
-    missing = "No module named bandit" in stderr or "not recognized" in stderr
+    missing = "No module named bandit" in stderr or "No module named 'semgrep'" in stderr or "not recognized" in stderr
     return {
         "missing": missing,
         "returncode": completed.returncode,
