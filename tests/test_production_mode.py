@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from synvulcommit.run_generation import _build_record, validate_production_settings
+from synvulcommit.validator import _run_command
 
 
 class ProductionModeTests(unittest.TestCase):
@@ -60,6 +61,56 @@ class ProductionModeTests(unittest.TestCase):
         self.assertEqual(1337, record["seed"])
         self.assertIn("generated_at", record)
         self.assertEqual({"passed": True, "reason_count": 0, "bandit_findings": 0, "semgrep_findings": 0}, record["validation_summary"])
+
+    def test_record_summary_counts_current_validator_tool_shape(self) -> None:
+        spec = SimpleNamespace(
+            cwe="CWE-78",
+            cwe_name="Command Injection",
+            mode="command_injection",
+            to_dict=lambda: {"cwe": "CWE-78", "mode": "command_injection"},
+        )
+        candidate = SimpleNamespace(
+            commit_message="Fix command injection",
+            filename="app.py",
+            vulnerable_code="import os\nos.system(user_input)\n",
+            fixed_code="import subprocess\nsubprocess.run(['echo', user_input], shell=False)\n",
+            diff="--- a/app.py\n+++ b/app.py\n",
+            badparts=["os.system(user_input)"],
+            goodparts=["subprocess.run(['echo', user_input], shell=False)"],
+            provider="local_http",
+        )
+
+        record = _build_record(
+            sample_id="CWE-78_command_injection_000001",
+            spec=spec,
+            candidate=candidate,
+            model="deepseek-v4-flash",
+            prompt_sha256="0" * 64,
+            seed=1337,
+            validation={
+                "passed": True,
+                "reasons": [],
+                "bandit_before": {"findings": [{"test_id": "B602"}]},
+                "bandit_after": {"findings": []},
+                "semgrep_before": {"findings": [{"check_id": "synvul.cwe-78.command-injection"}]},
+                "semgrep_after": {"findings": []},
+            },
+            attempt=1,
+        )
+
+        self.assertEqual(1, record["validation_summary"]["bandit_findings"])
+        self.assertEqual(1, record["validation_summary"]["semgrep_findings"])
+
+    def test_missing_semgrep_module_is_marked_unavailable(self) -> None:
+        result = _run_command(
+            [
+                "python",
+                "-c",
+                "import sys; sys.stderr.write(\"No module named 'semgrep'\"); sys.exit(1)",
+            ]
+        )
+
+        self.assertTrue(result["missing"])
 
 
 if __name__ == "__main__":
