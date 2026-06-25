@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .cwe_registry import get_cwe
+from .cwe_registry import all_semgrep_rule_ids, get_cwe
 from .llm_generator import GeneratedCommit
 from .spec_sampler import GenerationSpec
 from .structural_checks import run_structural_checks
@@ -21,6 +21,7 @@ from .structural_checks import run_structural_checks
 class ToolRun:
     name: str
     available: bool
+    status: str
     command: list[str]
     returncode: int | None
     findings: list[dict[str, Any]]
@@ -68,10 +69,8 @@ def validate_candidate(
         before_path.write_text(candidate.vulnerable_code, encoding="utf-8")
         after_path.write_text(candidate.fixed_code, encoding="utf-8")
 
-        bandit_before = _run_bandit(before_path)
-        bandit_after = _run_bandit(after_path)
-        semgrep_before = _run_semgrep(before_path, rules_dir)
-        semgrep_after = _run_semgrep(after_path, rules_dir)
+        bandit_before, bandit_after = _run_bandit_pair(before_path, after_path)
+        semgrep_before, semgrep_after = _run_semgrep_pair(before_path, after_path, rules_dir)
 
     _handle_tool_availability("Bandit", bandit_before, bandit_after, require_tools, reasons, warnings)
     _handle_tool_availability("Semgrep", semgrep_before, semgrep_after, require_tools, reasons, warnings)
@@ -89,8 +88,22 @@ def validate_candidate(
         after_ids = _semgrep_ids(semgrep_after)
         if not before_ids.intersection(definition.semgrep_rule_ids):
             reasons.append(f"Semgrep did not report expected ids before fix: {', '.join(definition.semgrep_rule_ids)}")
-        if after_ids.intersection(definition.semgrep_rule_ids):
-            reasons.append(f"Semgrep still reports expected ids after fix: {', '.join(sorted(after_ids.intersection(definition.semgrep_rule_ids)))}")
+        target_after_ids = after_ids.intersection(definition.semgrep_rule_ids)
+        if (
+            definition.key == "xss"
+            and target_after_ids == {"synvul.cwe-79.xss-helper"}
+            and structural_result.passed
+        ):
+            warnings.append("Semgrep XSS helper finding remained after a structurally verified escaping fix")
+            target_after_ids.clear()
+        if target_after_ids:
+            reasons.append(f"Semgrep still reports expected ids after fix: {', '.join(sorted(target_after_ids))}")
+        cross_cwe_after_ids = after_ids.intersection(all_semgrep_rule_ids()).difference(definition.semgrep_rule_ids)
+        if cross_cwe_after_ids:
+            reasons.append(
+                "Semgrep reports other SynVulCommit rule ids after fix: "
+                + ", ".join(sorted(cross_cwe_after_ids))
+            )
 
     return ValidationResult(
         passed=not reasons,
@@ -105,28 +118,42 @@ def validate_candidate(
 
 
 def _run_bandit(path: Path) -> ToolRun:
-    command = [sys.executable, "-m", "bandit", "-f", "json", "-q", str(path)]
+    return _run_bandit_paths([path])
+
+
+def _run_bandit_pair(before_path: Path, after_path: Path) -> tuple[ToolRun, ToolRun]:
+    combined = _run_bandit_paths([before_path, after_path])
+    return _split_tool_run(combined, [before_path, after_path], ("filename",))
+
+
+def _run_bandit_paths(paths: list[Path]) -> ToolRun:
+    command = [sys.executable, "-m", "bandit", "-f", "json", "-q", *(str(path) for path in paths)]
     completed = _run_command(command)
-    if completed["missing"]:
-        return ToolRun("bandit", False, command, completed["returncode"], [], completed["error"])
-    findings = _parse_bandit_findings(completed["stdout"])
-    return ToolRun("bandit", True, command, completed["returncode"], findings, completed["error"])
+    return _make_tool_run("bandit", command, completed, "results")
 
 
 def _run_semgrep(path: Path, rules_dir: Path) -> ToolRun:
+    return _run_semgrep_paths([path], rules_dir)
+
+
+def _run_semgrep_pair(before_path: Path, after_path: Path, rules_dir: Path) -> tuple[ToolRun, ToolRun]:
+    combined = _run_semgrep_paths([before_path, after_path], rules_dir)
+    return _split_tool_run(combined, [before_path, after_path], ("path", "filename"))
+
+
+def _run_semgrep_paths(paths: list[Path], rules_dir: Path) -> ToolRun:
+    semgrep_command, scripts_dir = _find_semgrep()
     command = [
-        sys.executable,
-        "-m",
-        "semgrep.console_scripts.pysemgrep",
+        semgrep_command,
         "--disable-version-check",
         "--metrics=off",
         "--json",
         "--quiet",
         "--config",
         str(rules_dir),
-        str(path),
+        *(str(path) for path in paths),
     ]
-    config_home = path.parent / "semgrep_config"
+    config_home = paths[0].parent / "semgrep_config"
     semgrep_data = config_home / ".semgrep"
     config_home.mkdir(parents=True, exist_ok=True)
     extra_env = {
@@ -134,11 +161,69 @@ def _run_semgrep(path: Path, rules_dir: Path) -> ToolRun:
         "SEMGREP_LOG_FILE": str(semgrep_data / "semgrep.log"),
         "SEMGREP_SETTINGS_FILE": str(semgrep_data / "settings.yml"),
     }
+    if scripts_dir is not None:
+        extra_env["PATH"] = str(scripts_dir) + ";" + os.environ.get("PATH", "")
     completed = _run_command(command, extra_env=extra_env)
-    if completed["missing"]:
-        return ToolRun("semgrep", False, command, completed["returncode"], [], completed["error"])
-    findings = _parse_semgrep_findings(completed["stdout"])
-    return ToolRun("semgrep", True, command, completed["returncode"], findings, completed["error"])
+    return _make_tool_run("semgrep", command, completed, "results")
+
+
+def _split_tool_run(tool_run: ToolRun, paths: list[Path], finding_path_keys: tuple[str, ...]) -> tuple[ToolRun, ...]:
+    return tuple(
+        ToolRun(
+            name=tool_run.name,
+            available=tool_run.available,
+            status=tool_run.status,
+            command=tool_run.command,
+            returncode=tool_run.returncode,
+            findings=[
+                finding
+                for finding in tool_run.findings
+                if _finding_matches_path(finding, path, finding_path_keys)
+            ],
+            error=tool_run.error,
+        )
+        for path in paths
+    )
+
+
+def _finding_matches_path(finding: dict[str, Any], path: Path, finding_path_keys: tuple[str, ...]) -> bool:
+    for key in finding_path_keys:
+        raw_path = finding.get(key)
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        candidate = Path(raw_path)
+        try:
+            if candidate.resolve() == path.resolve():
+                return True
+        except OSError:
+            pass
+        if candidate.name == path.name:
+            return True
+    return False
+
+
+def _make_tool_run(
+    name: str,
+    command: list[str],
+    completed: dict[str, Any],
+    findings_key: str,
+) -> ToolRun:
+    status = str(completed["status"])
+    if status != "completed":
+        return ToolRun(name, False, status, command, completed["returncode"], [], completed["error"])
+
+    findings, parse_error = _parse_findings(completed["stdout"], findings_key)
+    if parse_error:
+        message = _join_errors(completed["error"], parse_error)
+        return ToolRun(name, False, "error", command, completed["returncode"], [], message)
+    if completed["returncode"] not in {0, 1}:
+        message = _join_errors(
+            completed["error"],
+            f"tool exited with unexpected status {completed['returncode']}",
+        )
+        return ToolRun(name, False, "error", command, completed["returncode"], findings, message)
+
+    return ToolRun(name, True, "success", command, completed["returncode"], findings, completed["error"])
 
 
 def _run_command(
@@ -156,14 +241,14 @@ def _run_command(
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False, env=env)
     except FileNotFoundError as exc:
-        return {"missing": True, "returncode": None, "stdout": "", "error": str(exc)}
+        return {"status": "missing", "returncode": None, "stdout": "", "error": str(exc)}
     except subprocess.TimeoutExpired as exc:
-        return {"missing": False, "returncode": None, "stdout": exc.stdout or "", "error": "tool timed out"}
+        return {"status": "timeout", "returncode": None, "stdout": exc.stdout or "", "error": "tool timed out"}
 
     stderr = completed.stderr.strip()
-    missing = "No module named bandit" in stderr or "not recognized" in stderr
+    status = "missing" if _is_missing_tool_error(stderr) else "completed"
     return {
-        "missing": missing,
+        "status": status,
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "error": stderr or None,
@@ -190,24 +275,17 @@ def _find_semgrep() -> tuple[str, Path | None]:
     return "semgrep", None
 
 
-def _parse_bandit_findings(stdout: str) -> list[dict[str, Any]]:
+def _parse_findings(stdout: str, findings_key: str) -> tuple[list[dict[str, Any]], str | None]:
     if not stdout.strip():
-        return []
+        return [], "tool returned no JSON output"
     try:
         data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return []
-    return list(data.get("results", []))
-
-
-def _parse_semgrep_findings(stdout: str) -> list[dict[str, Any]]:
-    if not stdout.strip():
-        return []
-    try:
-        data = json.loads(stdout)
-    except json.JSONDecodeError:
-        return []
-    return list(data.get("results", []))
+    except json.JSONDecodeError as exc:
+        return [], f"tool returned invalid JSON: {exc.msg}"
+    findings = data.get(findings_key)
+    if not isinstance(findings, list):
+        return [], f"tool JSON is missing a list-valued '{findings_key}' field"
+    return [item for item in findings if isinstance(item, dict)], None
 
 
 def _bandit_ids(result: ToolRun) -> set[str]:
@@ -237,8 +315,38 @@ def _handle_tool_availability(
 ) -> None:
     if before.available and after.available:
         return
-    message = f"{label} is not available; install dependencies with: python -m pip install -r requirements.txt"
+    statuses = {before.status, after.status}
+    if "missing" in statuses:
+        message = f"{label} is not available; install dependencies with: python -m pip install -r requirements.txt"
+    elif "timeout" in statuses:
+        message = f"{label} timed out while validating the candidate"
+    else:
+        details = _first_error(before.error, after.error)
+        message = f"{label} failed to run correctly"
+        if details:
+            message = f"{message}: {details}"
     if require_tools:
         reasons.append(message)
     else:
         warnings.append(message)
+
+
+def _is_missing_tool_error(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return (
+        "no module named" in lowered
+        or "modulenotfounderror" in lowered
+        or "is not recognized as the name of a cmdlet" in lowered
+        or "not recognized as an internal or external command" in lowered
+    )
+
+
+def _join_errors(*messages: str | None) -> str | None:
+    return "\n".join(message for message in messages if message) or None
+
+
+def _first_error(*messages: str | None) -> str | None:
+    for message in messages:
+        if message:
+            return message.splitlines()[-1][:240]
+    return None

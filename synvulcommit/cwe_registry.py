@@ -72,11 +72,11 @@ CWE_DEFINITIONS: dict[str, CWEDefinition] = {
         ),
         fixed_requirements=(
             "Resolve the requested path against a fixed base directory.",
-            "Reject paths outside the base directory.",
+            "Reject paths outside the base directory with a path-aware containment check, never a string-prefix comparison.",
         ),
         prompt_hints=(
             "Good vulnerable sink example: open(os.path.join(BASE_DIR, name))",
-            "Good fixed pattern: requested = (BASE_DIR / name).resolve(); reject when requested is outside BASE_DIR.",
+            "Good fixed pattern: requested = (BASE_DIR / name).resolve(); use requested.is_relative_to(BASE_DIR) or requested.relative_to(BASE_DIR), never str(requested).startswith(str(BASE_DIR)).",
         ),
         semgrep_rule_ids=("synvul.cwe-22.path-traversal",),
         bandit_ids=(),
@@ -141,7 +141,7 @@ CWE_DEFINITIONS: dict[str, CWEDefinition] = {
             "Good vulnerable sink example: return render_template_string(\"<h1>\" + name + \"</h1>\")",
             "Good fixed pattern: use escape(name) or render_template_string(\"<h1>{{ name }}</h1>\", name=name).",
         ),
-        semgrep_rule_ids=("synvul.cwe-79.xss",),
+        semgrep_rule_ids=("synvul.cwe-79.xss", "synvul.cwe-79.xss-helper"),
         bandit_ids=("B703",),
     ),
     "xsrf": CWEDefinition(
@@ -170,6 +170,10 @@ CWE_DEFINITIONS: dict[str, CWEDefinition] = {
 
 def all_cwes() -> list[CWEDefinition]:
     return list(CWE_DEFINITIONS.values())
+
+
+def all_semgrep_rule_ids() -> frozenset[str]:
+    return frozenset(rule_id for definition in all_cwes() for rule_id in definition.semgrep_rule_ids)
 
 
 def get_cwe(key_or_mode: str) -> CWEDefinition:

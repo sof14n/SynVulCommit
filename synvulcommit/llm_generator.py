@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -15,10 +14,7 @@ from .spec_sampler import GenerationSpec
 
 
 class GenerationError(RuntimeError):
-    def __init__(self, message: str, *, reason: str = "generation_error", field_path: str | None = None) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.field_path = field_path
+    pass
 
 
 @dataclass
@@ -42,14 +38,20 @@ class GeneratedCommit:
 class Provider(Protocol):
     name: str
 
-    def generate(self, spec: GenerationSpec, prompt: str) -> dict[str, Any]:
+    def complete_json(self, system_prompt: str, prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
         ...
 
 
 def generate_commit(provider_name: str, spec: GenerationSpec, prompt: str) -> GeneratedCommit:
     provider = get_provider(provider_name)
-    raw = provider.generate(spec, prompt)
-    candidate = normalize_candidate(raw, provider.name, spec=spec)
+    if isinstance(provider, MockProvider):
+        raw = provider.generate(spec, prompt)
+    else:
+        raw = provider.complete_json(
+            "You generate strict JSON for defensive Python security dataset construction.",
+            prompt,
+        )
+    candidate = normalize_candidate(raw, provider.name)
     if not candidate.badparts:
         candidate.badparts = infer_vulnerable_lines(spec, candidate.vulnerable_code)
     if not candidate.goodparts:
@@ -57,30 +59,47 @@ def generate_commit(provider_name: str, spec: GenerationSpec, prompt: str) -> Ge
     return candidate
 
 
-def get_provider(provider_name: str) -> Provider:
+def get_provider(provider_name: str, reviewer_profile: bool = False) -> Provider:
     normalized = provider_name.lower().strip()
     if normalized == "mock":
         return MockProvider()
     if normalized == "openai_compatible":
-        return OpenAICompatibleProvider()
+        return OpenAICompatibleProvider(reviewer_profile=reviewer_profile)
     if normalized == "local_http":
-        return LocalHTTPProvider()
+        return LocalHTTPProvider(reviewer_profile=reviewer_profile)
     raise GenerationError(f"unknown provider '{provider_name}'. Use mock, openai_compatible, or local_http.")
 
 
-def provider_model_name(provider_name: str) -> str:
+def validate_provider_configuration(provider_name: str, reviewer_profile: bool = False) -> None:
     normalized = provider_name.lower().strip()
     if normalized == "mock":
-        return "mock"
+        return
+    prefix = "SYNVUL_REVIEW_" if reviewer_profile else "SYNVUL_"
     if normalized == "openai_compatible":
-        return os.environ.get("SYNVUL_MODEL", "<unset>")
+        required = (f"{prefix}API_KEY", f"{prefix}MODEL")
+        missing = [name for name in required if not os.environ.get(name, "").strip()]
+        if missing:
+            raise GenerationError(f"openai_compatible provider requires: {', '.join(missing)}")
+        _request_timeout(prefix)
+        _max_completion_tokens(prefix)
+        return
     if normalized == "local_http":
-        return os.environ.get("SYNVUL_LOCAL_MODEL", "<unset>")
-    return "<unknown>"
+        local_url = f"{prefix}LOCAL_URL"
+        if not os.environ.get(local_url, "").strip():
+            raise GenerationError(f"local_http provider requires: {local_url}")
+        _request_timeout(prefix)
+        return
+    get_provider(provider_name, reviewer_profile=reviewer_profile)
 
 
-def normalize_candidate(raw: dict[str, Any], provider_name: str, spec: GenerationSpec | None = None) -> GeneratedCommit:
-    validate_raw_candidate(raw, spec=spec)
+def normalize_candidate(raw: dict[str, Any], provider_name: str) -> GeneratedCommit:
+    if not isinstance(raw, dict):
+        raise GenerationError("provider returned JSON that is not an object")
+
+    required = ("commit_message", "vulnerable_code", "fixed_code")
+    missing = [field for field in required if not str(raw.get(field, "")).strip()]
+    if missing:
+        raise GenerationError(f"provider returned missing fields: {', '.join(missing)}")
 
     filename = str(raw.get("filename") or "app.py").strip()
     if not filename.endswith(".py"):
@@ -111,195 +130,21 @@ def normalize_candidate(raw: dict[str, Any], provider_name: str, spec: Generatio
     )
 
 
-def validate_raw_candidate(raw: dict[str, Any], spec: GenerationSpec | None = None) -> None:
-    if not isinstance(raw, dict):
-        _schema_error("<root>", "provider output must be a JSON object")
-
-    for field in ("commit_message", "vulnerable_code", "fixed_code"):
-        _require_non_empty_string(raw, field)
-
-    if "filename" in raw:
-        _require_non_empty_string(raw, "filename")
-
-    _require_string_list(raw, "vulnerable_lines")
-    _require_string_list(raw, "fixed_lines")
-
-    if spec is not None:
-        _validate_expected_cwe(raw, spec)
-
-
-def _require_non_empty_string(raw: dict[str, Any], field: str) -> None:
-    if field not in raw:
-        _schema_error(field, "required field is missing")
-    value = raw[field]
-    if not isinstance(value, str):
-        _schema_error(field, f"expected non-empty string, got {type(value).__name__}")
-    if not value.strip():
-        _schema_error(field, "expected non-empty string")
-
-
-def _require_string_list(raw: dict[str, Any], field: str) -> None:
-    if field not in raw:
-        _schema_error(field, "required field is missing")
-    value = raw[field]
-    if not isinstance(value, list):
-        _schema_error(field, f"expected non-empty list of strings, got {type(value).__name__}")
-    if not value:
-        _schema_error(field, "expected non-empty list of strings")
-    for index, item in enumerate(value):
-        if not isinstance(item, str):
-            _schema_error(f"{field}[{index}]", f"expected string, got {type(item).__name__}")
-        if not item.strip():
-            _schema_error(f"{field}[{index}]", "expected non-empty string")
-
-
-def _validate_expected_cwe(raw: dict[str, Any], spec: GenerationSpec) -> None:
-    expected = {
-        "cwe": spec.cwe.lower(),
-        "mode": spec.mode.lower(),
-        "cwe_key": spec.cwe_key.lower(),
-    }
-    for field, expected_value in expected.items():
-        if field not in raw or raw[field] in (None, ""):
-            continue
-        value = raw[field]
-        if not isinstance(value, str):
-            _schema_error(field, f"expected string, got {type(value).__name__}")
-        if value.strip().lower() != expected_value:
-            _schema_error(field, f"expected {expected_value}, got {value.strip().lower()}")
-
-
-def _schema_error(field_path: str, detail: str) -> None:
-    raise GenerationError(
-        f"schema validation failed at {field_path}: {detail}",
-        reason="schema_validation",
-        field_path=field_path,
-    )
-
-
 def parse_candidate_text(text: str) -> dict[str, Any]:
-    cleaned = strip_reasoning_text(text)
-    candidates = _json_object_candidates(cleaned)
-    if not candidates:
-        raise GenerationError("provider returned no valid JSON object", reason="no_valid_json")
-
-    decode_errors: list[json.JSONDecodeError] = []
-    fallback: dict[str, Any] | None = None
-    for candidate in reversed(candidates):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            decode_errors.append(exc)
-            continue
-        if isinstance(parsed, dict):
-            if _looks_like_generated_commit(parsed):
-                return parsed
-            if fallback is None:
-                fallback = parsed
-
-    if fallback is not None:
-        return fallback
-
-    if decode_errors:
-        raise GenerationError("provider returned malformed JSON object", reason="json_parse_error") from decode_errors[-1]
-    raise GenerationError("provider returned no JSON object", reason="no_valid_json")
-
-
-def strip_reasoning_text(text: str) -> str:
-    cleaned = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = cleaned.strip()
+    cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(r"```$", "", cleaned).strip()
-    return cleaned
-
-
-def _json_object_candidates(text: str) -> list[str]:
-    spans: list[tuple[int, int]] = []
-    start: int | None = None
-    depth = 0
-    in_string = False
-    escape = False
-
-    for index, char in enumerate(text):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-            continue
-        if char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-            continue
-        if char == "}" and depth > 0:
-            depth -= 1
-            if depth == 0 and start is not None:
-                spans.append((start, index + 1))
-                start = None
-
-    if not spans:
-        spans = _recover_json_object_spans(text)
-    return [text[start:end].strip() for start, end in _unique_spans(spans)]
-
-
-def _recover_json_object_spans(text: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    for start, char in enumerate(text):
-        if char != "{":
-            continue
-        end = _find_json_object_end(text, start)
-        if end is not None:
-            spans.append((start, end))
-    return spans
-
-
-def _find_json_object_end(text: str, start: int) -> int | None:
-    depth = 0
-    in_string = False
-    escape = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-    return None
-
-
-def _unique_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    seen: set[tuple[int, int]] = set()
-    result: list[tuple[int, int]] = []
-    for span in spans:
-        if span in seen:
-            continue
-        seen.add(span)
-        result.append(span)
-    return result
-
-
-def _looks_like_generated_commit(value: dict[str, Any]) -> bool:
-    required = ("commit_message", "vulnerable_code", "fixed_code")
-    return all(key in value for key in required)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(cleaned[start : end + 1])
+            except json.JSONDecodeError as exc:
+                raise GenerationError(f"provider returned malformed JSON: {exc}; preview={cleaned[:500]!r}") from exc
+        raise GenerationError(f"provider returned no JSON object; preview={cleaned[:500]!r}")
 
 
 def _normalize_code(code: str) -> str:
@@ -386,33 +231,65 @@ class MockProvider:
         except KeyError as exc:
             raise GenerationError(f"no mock sample for {spec.cwe_key}") from exc
 
+    def complete_json(self, system_prompt: str, prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
+        del system_prompt, prompt, max_tokens
+        return {
+            "verdict": "pass",
+            "cwe_correct": True,
+            "fix_correct": True,
+            "context_correct": True,
+            "runtime_plausible": True,
+            "reason_category": "none",
+        }
+
 
 class OpenAICompatibleProvider:
     name = "openai_compatible"
 
+    def __init__(self, reviewer_profile: bool = False) -> None:
+        self.prefix = "SYNVUL_REVIEW_" if reviewer_profile else "SYNVUL_"
+
     def generate(self, spec: GenerationSpec, prompt: str) -> dict[str, Any]:
         del spec
-        base_url = os.environ.get("SYNVUL_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        api_key = os.environ.get("SYNVUL_API_KEY")
-        model = os.environ.get("SYNVUL_MODEL")
+        return self.complete_json(
+            "You generate strict JSON for defensive Python security dataset construction.",
+            prompt,
+        )
+
+    def complete_json(self, system_prompt: str, prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
+        base_url = os.environ.get(f"{self.prefix}BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        api_key = os.environ.get(f"{self.prefix}API_KEY")
+        model = os.environ.get(f"{self.prefix}MODEL")
         if not api_key:
-            raise GenerationError("SYNVUL_API_KEY is required for openai_compatible provider")
+            raise GenerationError(f"{self.prefix}API_KEY is required for openai_compatible provider")
         if not model:
-            raise GenerationError("SYNVUL_MODEL is required for openai_compatible provider")
+            raise GenerationError(f"{self.prefix}MODEL is required for openai_compatible provider")
 
         url = f"{base_url}/chat/completions"
         payload = {
             "model": model,
-            "temperature": float(os.environ.get("SYNVUL_TEMPERATURE", "0.7")),
+            "temperature": float(os.environ.get(f"{self.prefix}TEMPERATURE", "0.2")),
+            "max_tokens": max_tokens if max_tokens is not None else _max_completion_tokens(self.prefix),
             "messages": [
                 {
                     "role": "system",
-                    "content": "You generate strict JSON for defensive Python security dataset construction.",
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": prompt},
             ],
         }
-        response = _post_json(url, payload, {"Authorization": f"Bearer {api_key}"})
+        response_format = os.environ.get(f"{self.prefix}RESPONSE_FORMAT", "").strip().lower()
+        if response_format == "json_object" or (not response_format and "api.deepseek.com" in base_url):
+            payload["response_format"] = {"type": "json_object"}
+        thinking_mode = _thinking_mode(self.prefix)
+        if thinking_mode:
+            payload["thinking"] = {"type": thinking_mode}
+        response = _post_json(
+            url,
+            payload,
+            {"Authorization": f"Bearer {api_key}"},
+            timeout=_request_timeout(self.prefix),
+        )
         text = _extract_text(response)
         return parse_candidate_text(text)
 
@@ -420,37 +297,45 @@ class OpenAICompatibleProvider:
 class LocalHTTPProvider:
     name = "local_http"
 
+    def __init__(self, reviewer_profile: bool = False) -> None:
+        self.prefix = "SYNVUL_REVIEW_" if reviewer_profile else "SYNVUL_"
+
     def generate(self, spec: GenerationSpec, prompt: str) -> dict[str, Any]:
         del spec
-        url = os.environ.get("SYNVUL_LOCAL_URL")
+        return self.complete_json(
+            "You generate strict JSON for defensive Python security dataset construction.",
+            prompt,
+        )
+
+    def complete_json(self, system_prompt: str, prompt: str, max_tokens: int | None = None) -> dict[str, Any]:
+        url = os.environ.get(f"{self.prefix}LOCAL_URL")
         if not url:
-            raise GenerationError("SYNVUL_LOCAL_URL is required for local_http provider")
-        model = os.environ.get("SYNVUL_LOCAL_MODEL")
+            raise GenerationError(f"{self.prefix}LOCAL_URL is required for local_http provider")
+        model = os.environ.get(f"{self.prefix}LOCAL_MODEL")
         payload: dict[str, Any] = {
-            "prompt": prompt,
+            "prompt": f"{system_prompt}\n\n{prompt}",
             "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
             "options": {
-                "temperature": float(os.environ.get("SYNVUL_TEMPERATURE", "0.2")),
-                "num_predict": int(os.environ.get("SYNVUL_NUM_PREDICT", "4096")),
+                "temperature": float(os.environ.get(f"{self.prefix}TEMPERATURE", "0.2")),
+                "num_predict": max_tokens if max_tokens is not None else int(os.environ.get(f"{self.prefix}NUM_PREDICT", "4096")),
             },
         }
-        response_format = os.environ.get("SYNVUL_LOCAL_FORMAT", "json").strip()
+        response_format = os.environ.get(f"{self.prefix}LOCAL_FORMAT", "json").strip()
         if response_format:
             payload["format"] = response_format
         if model:
             payload["model"] = model
         headers: dict[str, str] = {}
-        token = os.environ.get("SYNVUL_LOCAL_AUTH")
+        token = os.environ.get(f"{self.prefix}LOCAL_AUTH")
         if token:
             headers["Authorization"] = token
-        response = _post_json(url, payload, headers)
+        response = _post_json(url, payload, headers, timeout=_request_timeout(self.prefix))
         text = _extract_text(response)
         return parse_candidate_text(text)
 
 
-def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    timeout = float(os.environ.get("SYNVUL_HTTP_TIMEOUT", "300"))
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float | None = None) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -458,19 +343,52 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout if timeout is not None else _request_timeout()) as response:
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise GenerationError(f"provider HTTP {exc.code}: {body[:500]}") from exc
-    except (TimeoutError, socket.timeout) as exc:
-        raise GenerationError(f"provider request timed out after {timeout:g}s", reason="provider_timeout") from exc
     except urllib.error.URLError as exc:
         raise GenerationError(f"provider request failed: {exc}") from exc
+    except TimeoutError as exc:
+        raise GenerationError("provider request timed out while reading the response") from exc
+    except OSError as exc:
+        raise GenerationError(f"provider connection failed: {exc}") from exc
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
         raise GenerationError(f"provider returned non-JSON response: {body[:500]}") from exc
+
+
+def _request_timeout(prefix: str = "SYNVUL_") -> float:
+    raw_value = os.environ.get(f"{prefix}REQUEST_TIMEOUT", "180")
+    try:
+        timeout = float(raw_value)
+    except ValueError as exc:
+        raise GenerationError(f"{prefix}REQUEST_TIMEOUT must be a number of seconds") from exc
+    if not 0 < timeout <= 600:
+        raise GenerationError(f"{prefix}REQUEST_TIMEOUT must be greater than 0 and at most 600 seconds")
+    return timeout
+
+
+def _max_completion_tokens(prefix: str = "SYNVUL_") -> int:
+    raw_value = os.environ.get(f"{prefix}MAX_TOKENS", "1800")
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise GenerationError(f"{prefix}MAX_TOKENS must be an integer") from exc
+    if not 256 <= value <= 8192:
+        raise GenerationError(f"{prefix}MAX_TOKENS must be between 256 and 8192")
+    return value
+
+
+def _thinking_mode(prefix: str = "SYNVUL_") -> str | None:
+    value = os.environ.get(f"{prefix}THINKING_MODE", "").strip().lower()
+    if not value:
+        return None
+    if value not in {"enabled", "disabled"}:
+        raise GenerationError(f"{prefix}THINKING_MODE must be 'enabled' or 'disabled'")
+    return value
 
 
 def _extract_text(response: dict[str, Any]) -> str:

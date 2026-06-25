@@ -1,0 +1,114 @@
+Full Pipeline Design 
+1. CWE & Task Selection (Define what to generate)
+The system first selects one vulnerability type from a fixed set of 7 CWEs (VUDENC-style subset):
+
+    SQL Injection (CWE-89)
+    Command Injection (CWE-78)
+    Path Traversal (CWE-22)
+    Open Redirect (CWE-601)
+    Remote Code Execution (CWE-94 / CWE-95)
+    Cross-Site Scripting (CWE-79)
+    Cross-Site Request Forgery (CWE-352) 
+
+It also selects:
+
+    application type (Flask, Django, CLI, API, script)
+    vulnerability pattern (direct flow, indirect flow, complex flow)
+    difficulty level (easy, medium, hard) 
+
+Output: a structured specification of what kind of vulnerable program to generate.
+2. Prompt Construction (Instruction to LLM)
+A structured prompt is built for the LLM.
+It defines:
+
+    which CWE must appear
+    how the vulnerability should be implemented
+    program context (web app, CLI, etc.)
+    requirement to produce both vulnerable and fixed versions
+    requirement to simulate a Git commit (message + diff) 
+
+Output: a precise generation instruction.
+ 3. LLM-Based Commit Generation
+The LLM generates a synthetic GitHub-style security commit, containing:
+
+     vulnerable Python code (before fix)
+    secure Python code (after fix)
+     commit message describing the fix
+    code diff showing changes 
+
+This simulates a real-world vulnerability patch.
+4. Validation Layer (Correctness Check)
+Generated samples are validated using static analysis tools:
+
+    Bandit
+    Semgrep 
+
+Validation ensures:
+
+    vulnerable code is actually detected as vulnerable
+    fixed code is no longer flagged
+    CWE pattern matches expected vulnerability type 
+
+Invalid samples are rejected and regenerated.
+5. Diversity Control (Avoid repetition)
+To prevent template-like data, the system enforces diversity in:
+
+    program structure (function, class, multi-module)
+    execution context (web app, CLI, API service, script)
+    data flow patterns (direct vs indirect vs multi-step)
+    naming conventions and code style 
+
+This ensures each sample is unique and realistic.
+ 6. Dataset Construction (Final storage)
+Only validated samples are stored in the dataset.
+Each entry includes:
+
+    CWE label
+    vulnerable code
+    fixed code
+    commit message
+    diff
+    context information
+    validation results 
+
+This forms a clean, ML-ready dataset.
+7. Full Generation Loop (Scalable system)
+The system runs continuously:
+
+    Select CWE and context
+    Build prompt
+    Generate commit via LLM
+    Validate with security tools
+    Check diversity constraints
+    Store valid sample
+    Repeat at scale 
+
+Final One-Sentence Idea
+You are building:
+
+    A validated, diversity-controlled synthetic commit generation system that simulates GitHub-like vulnerability fixes across 7 Python CWEs using LLMs and static analysis tools to produce high-quality training data for machine learning models.
+
+
+
+
+    and your abstract and title could be 
+    Title :  SynVulCommit: A Validated LLM-Based Synthetic Commit Generator for CWE-Balanced Python Vulnerability Datasets
+    Abstract
+    Vulnerability detection in source code relies heavily on high-quality labeled datasets. However, existing datasets are typically derived from GitHub commit mining pipelines, which suffer from limited control over vulnerability distribution, noisy labels, and poor coverage of rare vulnerability types. To address these limitations, we propose SynVulCommit, a validated synthetic data generation framework for Python vulnerability detection.
+    SynVulCommit simulates GitHub-style security commits using large language models (LLMs) to generate paired vulnerable and fixed code samples across seven widely studied Common Weakness Enumeration (CWE) categories, including SQL Injection, Command Injection, Path Traversal, Open Redirect, Remote Code Execution, Cross-Site Scripting, and Cross-Site Request Forgery. The system constructs commit-like artifacts consisting of vulnerable code, patched code, commit messages, and diffs, thereby closely mimicking real-world software evolution.
+    To ensure dataset correctness and reliability, SynVulCommit incorporates a validation layer using static analysis tools such as Bandit and Semgrep, combined with CWE-specific structural checks. Additionally, a diversity control mechanism enforces variability in program structure, execution context, and data-flow patterns to avoid template-like generation and improve generalization.
+    The resulting framework produces a CWE-balanced, high-diversity, and automatically validated dataset suitable for training and evaluating machine learning models for vulnerability detection and repair. SynVulCommit provides a scalable alternative to traditional GitHub mining approaches and enables controlled experimentation in secure code learning tasks.
+
+    How you SHOULD evaluate it (proper setup)
+    You should run controlled experiments, not just one model.
+    Model A — Baseline
+
+        trained only on VUDENC dataset 
+
+    Model B — Synthetic only
+
+        trained only on your generated dataset 
+
+    Model C — Mixed (important)
+
+        VUDENC + synthetic combined

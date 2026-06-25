@@ -3,8 +3,5 @@ rules:
     message: Redirect target is controlled by request data.
     severity: WARNING
     languages: [python]
-    patterns:
-      - pattern-either:
-          - pattern-regex: 'redirect\s*\(\s*request\.(args|form)\.get'
-          - pattern-regex: 'redirect\s*\(\s*(target|next_url|next|url)\s*\)'
-      - pattern-not-regex: '(urlparse|netloc|scheme|allowed|startswith\s*\()'
+    pattern-regex: >-
+      (?s)\A(?!.*(?:urlparse|netloc|scheme|allowed|startswith\s*\()).*\b(?:redirect|HttpResponseRedirect|RedirectResponse)\s*\(\s*(?:request\.(?:args|form|GET|POST)\.get|target\b|next_url\b|next\b|url\b)

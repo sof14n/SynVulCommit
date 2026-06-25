@@ -1,68 +1,65 @@
 from __future__ import annotations
 
-import json
-import tempfile
 import unittest
-from pathlib import Path
 
-from synvulcommit.diversity import DiversityIndex, write_diversity_summary
-from synvulcommit.storage import append_jsonl
+from synvulcommit.diversity import DiversityIndex
 
 
 class DiversityIndexTests(unittest.TestCase):
-    def test_exact_code_pair_duplicate_is_rejected_with_match_detail(self) -> None:
+    def test_exact_code_pair_duplicate_is_rejected(self) -> None:
         index = DiversityIndex()
         first = _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1"))
         duplicate = dict(first, id="sample-2")
 
-        self.assertAccepted(index, first)
+        self._assert_accepted(index, first)
         accepted, reason = index.accepts(duplicate)
 
         self.assertFalse(accepted)
         self.assertEqual("duplicate code pair hash", reason)
         self.assertEqual("exact_code_pair", index.last_rejection["check"])
         self.assertEqual("sample-1", index.last_rejection["matched_id"])
-        self.assertIn("fingerprint", index.last_rejection)
 
-    def test_renamed_variable_duplicate_is_rejected_by_normalized_ast(self) -> None:
+    def test_renamed_variables_and_literals_are_rejected_by_normalized_ast(self) -> None:
         index = DiversityIndex()
         first = _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1"))
-        renamed = _record("sample-2", _simple_code("username", "score", "1"), _simple_fixed("username", "score", "1"))
+        renamed = _record("sample-2", _simple_code("username", "score", "99"), _simple_fixed("username", "score", "100"))
 
-        self.assertAccepted(index, first)
+        self._assert_accepted(index, first)
         accepted, reason = index.accepts(renamed)
 
         self.assertFalse(accepted)
         self.assertEqual("duplicate normalized AST fingerprint", reason)
         self.assertEqual("normalized_ast", index.last_rejection["check"])
-        self.assertEqual("sample-1", index.last_rejection["matched_id"])
 
-    def test_literal_only_variation_is_rejected_by_normalized_ast(self) -> None:
+    def test_normalized_ast_duplicate_is_rejected_across_cwes(self) -> None:
         index = DiversityIndex()
         first = _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1"))
-        literal_variant = _record("sample-2", _simple_code("name", "total", "99"), _simple_fixed("name", "total", "100"))
+        different_cwe = _record("sample-2", _simple_code("user", "value", "2"), _simple_fixed("user", "value", "3"))
+        different_cwe["cwe"] = "CWE-78"
+        different_cwe["mode"] = "command_injection"
 
-        self.assertAccepted(index, first)
-        accepted, reason = index.accepts(literal_variant)
+        self._assert_accepted(index, first)
+        accepted, reason = index.accepts(different_cwe)
 
         self.assertFalse(accepted)
         self.assertEqual("duplicate normalized AST fingerprint", reason)
-        self.assertEqual("normalized_ast", index.last_rejection["check"])
+        self.assertEqual("sample-1", index.last_rejection["matched_id"])
 
-    def test_near_duplicate_above_threshold_is_rejected(self) -> None:
+    def test_token_near_duplicate_is_rejected_with_similarity_detail(self) -> None:
         index = DiversityIndex()
-        first = _record("sample-1", _long_code(extra_line=""), _long_fixed(extra_line=""))
-        near_duplicate = _record("sample-2", _long_code(extra_line="    marker = step_17\n"), _long_fixed(extra_line="    marker = step_17\n"))
+        first = _record("sample-1", _long_code(""), _long_fixed(""))
+        near_duplicate = _record("sample-2", _long_code("    marker = step_17\n"), _long_fixed("    marker = step_17\n"))
 
-        self.assertAccepted(index, first)
+        self._assert_accepted(index, first)
         accepted, reason = index.accepts(near_duplicate)
 
         self.assertFalse(accepted)
         self.assertTrue(reason.startswith("near-duplicate token shingles similarity"))
         self.assertEqual("near_duplicate", index.last_rejection["check"])
         self.assertGreaterEqual(index.last_rejection["similarity"], 0.90)
+        self.assertEqual(0.90, index.last_rejection["threshold"])
 
-    def test_distinct_sample_below_threshold_is_accepted(self) -> None:
+    def test_distinct_same_cwe_sample_is_accepted(self) -> None:
         index = DiversityIndex()
         first = _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1"))
         distinct = _record(
@@ -71,41 +68,21 @@ class DiversityIndexTests(unittest.TestCase):
             "import subprocess\n\ndef ping(host):\n    return subprocess.run(['ping', host], shell=False)\n",
         )
 
-        self.assertAccepted(index, first)
-        self.assertAccepted(index, distinct)
+        self._assert_accepted(index, first)
+        self._assert_accepted(index, distinct)
 
-    def test_summary_tracks_required_distributions(self) -> None:
-        index = DiversityIndex()
-        self.assertAccepted(index, _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1")))
-        summary = index.summary()
-
-        self.assertEqual(1, summary["total_records"])
-        self.assertEqual({"CWE-89": 1}, summary["distributions"]["cwe"])
-        self.assertEqual({"Flask": 1}, summary["distributions"]["application_type"])
-        self.assertEqual({"direct": 1}, summary["distributions"]["flow_pattern"])
-        self.assertEqual({"easy": 1}, summary["distributions"]["difficulty"])
-        self.assertEqual({"single_function": 1}, summary["distributions"]["structure"])
-
-    def test_rejection_detail_is_jsonl_serializable(self) -> None:
-        index = DiversityIndex()
+    def test_existing_records_participate_in_duplicate_checks(self) -> None:
         first = _record("sample-1", _simple_code("name", "total", "1"), _simple_fixed("name", "total", "1"))
         duplicate = dict(first, id="sample-2")
-        self.assertAccepted(index, first)
+        index = DiversityIndex()
+        index.load_existing([first])
+
         accepted, reason = index.accepts(duplicate)
+
         self.assertFalse(accepted)
+        self.assertEqual("duplicate code pair hash", reason)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "rejected.jsonl"
-            summary_path = Path(tmp) / "diversity_summary.json"
-            append_jsonl(path, {**duplicate, "reject_reason": [reason], "diversity_rejection": index.last_rejection})
-            write_diversity_summary(index.summary(), summary_path)
-            rejected = json.loads(path.read_text(encoding="utf-8"))
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-
-        self.assertEqual("sample-1", rejected["diversity_rejection"]["matched_id"])
-        self.assertIn("exact_code_pair", summary["duplicate_rejections"])
-
-    def assertAccepted(self, index: DiversityIndex, record: dict[str, object]) -> None:
+    def _assert_accepted(self, index: DiversityIndex, record: dict[str, object]) -> None:
         accepted, reason = index.accepts(record)
         self.assertTrue(accepted, reason)
 
@@ -146,15 +123,4 @@ def _long_code(extra_line: str) -> str:
 
 
 def _long_fixed(extra_line: str) -> str:
-    operators = ["+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "&", "^"]
-    lines = ["def lookup(value):", "    result = value"]
-    for index in range(80):
-        lines.append(f"    result = result {operators[index % len(operators)]} value")
-    if extra_line:
-        lines.append(extra_line.rstrip())
-    lines.append("    return str(result)")
-    return "\n".join(lines) + "\n"
-
-
-if __name__ == "__main__":
-    unittest.main()
+    return _long_code(extra_line).replace("return result", "return str(result)")

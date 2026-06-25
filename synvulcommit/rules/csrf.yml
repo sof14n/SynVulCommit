@@ -3,4 +3,4 @@ rules:
     message: CSRF protection is disabled.
     severity: WARNING
     languages: [python]
-    pattern-regex: '(?s)^(?!.*(CSRFProtect|csrf_token|csrfmiddlewaretoken|csrf_protect|WTF_CSRF_ENABLED["'']?\]?\s*=\s*True)).*(WTF_CSRF_ENABLED["'']?\]?\s*=\s*False|csrf\.exempt|@app\.(post|route)\([^\\n]*(POST|post))'
+    pattern-regex: '(?i)(WTF_CSRF_ENABLED["'']?\]?\s*=\s*False|csrf\.exempt)'

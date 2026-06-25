@@ -1,6 +1,38 @@
 rules:
   - id: synvul.cwe-79.xss
+    message: User-controlled data reaches an HTML response without escaping.
+    severity: WARNING
+    languages: [python]
+    mode: taint
+    pattern-sources:
+      - pattern: $REQUEST.GET.get(...)
+      - pattern: $REQUEST.args.get(...)
+      - pattern: $REQUEST.form.get(...)
+      - pattern: $REQUEST.form[...]
+    pattern-sinks:
+      - patterns:
+          - pattern: HttpResponse($VALUE)
+          - pattern-not: HttpResponse($OBJECT.$ATTRIBUTE)
+          - pattern-not: HttpResponse($OBJECT.$METHOD(...))
+      - patterns:
+          - pattern: Response($VALUE, ...)
+          - pattern-not: Response($OBJECT.$ATTRIBUTE)
+          - pattern-not: Response($OBJECT.$METHOD(...))
+      - pattern: render_template_string($VALUE)
+    pattern-sanitizers:
+      - pattern: escape(...)
+      - pattern: format_html(...)
+
+  - id: synvul.cwe-79.xss-helper
     message: User-controlled data is rendered into HTML without escaping.
     severity: WARNING
     languages: [python]
-    pattern-regex: 'render_template_string\s*\([^)]*(\+|%|\.format\(|Markup\()'
+    patterns:
+      - pattern-either:
+          - pattern-regex: >-
+              render_template_string\s*\([^)]*(\+|%|\.format\(|Markup\(|f["'])
+          - pattern-regex: >-
+              (HttpResponse|Response)\s*\(\s*f["']
+          - pattern-regex: >-
+              return\s+f?["']\s*<[^\n]*(\+|%|\.format\(|\{)
+      - pattern-not-regex: '(escape\s*\(|format_html\s*\()'

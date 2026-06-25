@@ -1,0 +1,35 @@
+\chapter{Introduction}\label{chap:introduction}
+
+\section{Example citation \& symbol reference}\label{sec:citation}
+For symbols look at \cite{latex_symbols_2017}.
+
+
+\section{Example reference}
+Example reference: Look at chapter~\ref{chap:introduction}, for sections, look at section~\ref{sec:citation}.
+
+\section{Example image}
+
+\begin{figure}
+	\centering
+	\includegraphics[width=0.5\linewidth]{uni-logo}
+	\caption{Meaningful caption for this image}
+	\label{fig:uniLogo}
+\end{figure}
+
+Example figure reference: Look at Figure~\ref{fig:uniLogo} to see an image. It can be \texttt{jpg}, \texttt{png}, or best: \texttt{pdf} (if vector graphic).
+
+\section{Example table}
+
+\begin{table}
+	\centering
+	\begin{tabular}{lr}
+		First column & Number column \\
+		\hline
+		Accuracy & 0.532 \\
+		F1 score & 0.87
+	\end{tabular}
+	\caption{Meaningful caption for this table}
+	\label{tab:result}
+\end{table}
+
+Table~\ref{tab:result} shows a simple table\footnote{Check \url{https://en.wikibooks.org/wiki/LaTeX/Tables} on syntax}

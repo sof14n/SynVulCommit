@@ -20,3 +20,18 @@ rules:
           $QUERY = "..." % $VALUE
           ...
           $CUR.execute($QUERY)
+      - patterns:
+          - pattern: $QUERY += f"..."
+          - metavariable-regex:
+              metavariable: $QUERY
+              regex: (?i).*(query|sql|statement).*
+      - patterns:
+          - pattern: $QUERY += "..." + $VALUE
+          - metavariable-regex:
+              metavariable: $QUERY
+              regex: (?i).*(query|sql|statement).*
+      # A query-builder helper can return dynamic SQL for execution elsewhere.
+      # Restrict these fallback patterns to SQL-looking text so ordinary HTML
+      # interpolation in XSS samples is not misclassified as SQL injection.
+      - pattern-regex: (?i)\breturn\s+f["'][^\n]*(?:select|insert|update|delete|replace|with)\b[^\n]*["']
+      - pattern-regex: (?i)\breturn\s+["']\s*(?:select|insert|update|delete|replace|with)\b[^"'\n]*["']\s*(?:\+|%|\.format\()

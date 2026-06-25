@@ -24,7 +24,7 @@ class DiversityEntry:
     context: dict[str, Any]
     exact_pair_hash: str
     ast_fingerprint: str
-    shingles: set[str]
+    shingles: frozenset[str]
 
 
 @dataclass
@@ -32,54 +32,45 @@ class DiversityIndex:
     near_duplicate_threshold: float = NEAR_DUPLICATE_THRESHOLD
     shingle_size: int = TOKEN_SHINGLE_SIZE
     exact_pair_hashes: dict[str, DiversityEntry] = field(default_factory=dict)
-    ast_fingerprints_by_bucket: dict[str, dict[str, DiversityEntry]] = field(default_factory=dict)
-    entries_by_bucket: dict[str, list[DiversityEntry]] = field(default_factory=dict)
+    ast_fingerprints: dict[str, DiversityEntry] = field(default_factory=dict)
+    entries_by_bucket: dict[str, dict[str, DiversityEntry]] = field(default_factory=dict)
+    shingle_index_by_bucket: dict[str, dict[str, set[str]]] = field(default_factory=dict)
     rejection_counts: dict[str, int] = field(default_factory=dict)
     last_rejection: dict[str, Any] | None = None
 
     def load_existing(self, records: list[dict[str, Any]]) -> None:
         for record in records:
-            self._add_entry(record)
+            self._store_entry(make_entry(record, self.shingle_size))
 
     def accepts(self, record: dict[str, Any]) -> tuple[bool, str | None]:
         self.last_rejection = None
         entry = make_entry(record, self.shingle_size)
-        bucket = entry.cwe or entry.mode
+        bucket = _bucket(entry)
 
         exact_match = self.exact_pair_hashes.get(entry.exact_pair_hash)
         if exact_match is not None:
-            return self._reject(
-                reason="duplicate code pair hash",
-                check="exact_code_pair",
-                matched_entry=exact_match,
-                fingerprint=entry.exact_pair_hash,
-            )
+            return self._reject("duplicate code pair hash", "exact_code_pair", exact_match, entry.exact_pair_hash)
 
-        ast_match = self.ast_fingerprints_by_bucket.get(bucket, {}).get(entry.ast_fingerprint)
+        ast_match = self.ast_fingerprints.get(entry.ast_fingerprint)
         if ast_match is not None:
-            return self._reject(
-                reason="duplicate normalized AST fingerprint",
-                check="normalized_ast",
-                matched_entry=ast_match,
-                fingerprint=entry.ast_fingerprint,
-            )
+            return self._reject("duplicate normalized AST fingerprint", "normalized_ast", ast_match, entry.ast_fingerprint)
 
-        for existing in self.entries_by_bucket.get(bucket, []):
+        for existing in self._shingle_candidates(entry):
             similarity = jaccard_similarity(entry.shingles, existing.shingles)
             if similarity >= self.near_duplicate_threshold:
                 return self._reject(
-                    reason=f"near-duplicate token shingles similarity {similarity:.3f}",
-                    check="near_duplicate",
-                    matched_entry=existing,
-                    fingerprint=entry.exact_pair_hash,
-                    similarity=similarity,
+                    f"near-duplicate token shingles similarity {similarity:.3f}",
+                    "near_duplicate",
+                    existing,
+                    entry.exact_pair_hash,
+                    similarity,
                 )
 
         self._store_entry(entry)
         return True, None
 
     def summary(self) -> dict[str, Any]:
-        entries = [entry for bucket_entries in self.entries_by_bucket.values() for entry in bucket_entries]
+        entries = [entry for bucket_entries in self.entries_by_bucket.values() for entry in bucket_entries.values()]
         return {
             "total_records": len(entries),
             "near_duplicate_threshold": self.near_duplicate_threshold,
@@ -94,14 +85,23 @@ class DiversityIndex:
             },
         }
 
-    def _add_entry(self, record: dict[str, Any]) -> None:
-        self._store_entry(make_entry(record, self.shingle_size))
+    def _shingle_candidates(self, entry: DiversityEntry) -> list[DiversityEntry]:
+        bucket_entries = self.entries_by_bucket.get(_bucket(entry), {})
+        index = self.shingle_index_by_bucket.get(_bucket(entry), {})
+        candidate_ids: set[str] = set()
+        for shingle in entry.shingles:
+            candidate_ids.update(index.get(shingle, set()))
+        return [bucket_entries[candidate_id] for candidate_id in sorted(candidate_ids) if candidate_id in bucket_entries]
 
     def _store_entry(self, entry: DiversityEntry) -> None:
-        bucket = entry.cwe or entry.mode
+        bucket = _bucket(entry)
+        entry_id = _entry_id(entry)
         self.exact_pair_hashes.setdefault(entry.exact_pair_hash, entry)
-        self.ast_fingerprints_by_bucket.setdefault(bucket, {}).setdefault(entry.ast_fingerprint, entry)
-        self.entries_by_bucket.setdefault(bucket, []).append(entry)
+        self.ast_fingerprints.setdefault(entry.ast_fingerprint, entry)
+        self.entries_by_bucket.setdefault(bucket, {}).setdefault(entry_id, entry)
+        shingle_index = self.shingle_index_by_bucket.setdefault(bucket, {})
+        for shingle in entry.shingles:
+            shingle_index.setdefault(shingle, set()).add(entry_id)
 
     def _reject(
         self,
@@ -137,7 +137,7 @@ def make_entry(record: dict[str, Any], shingle_size: int = TOKEN_SHINGLE_SIZE) -
         context=context,
         exact_pair_hash=make_code_pair_hash(record),
         ast_fingerprint=make_code_pair_ast_fingerprint(record),
-        shingles=make_code_pair_shingles(record, shingle_size),
+        shingles=frozenset(make_code_pair_shingles(record, shingle_size)),
     )
 
 
@@ -170,7 +170,7 @@ def make_code_pair_shingles(record: dict[str, Any], shingle_size: int = TOKEN_SH
     return _shingles(tokens, shingle_size)
 
 
-def jaccard_similarity(left: set[str], right: set[str]) -> float:
+def jaccard_similarity(left: frozenset[str] | set[str], right: frozenset[str] | set[str]) -> float:
     union = left | right
     if not union:
         return 0.0
@@ -283,11 +283,14 @@ def _normalized_tokens(code: str) -> list[str]:
                 tokens.append(token.string)
         return tokens
     except (tokenize.TokenError, IndentationError):
-        return _fallback_tokens(code)
-
-
-def _fallback_tokens(code: str) -> list[str]:
-    return [token.lower() for token in re.findall(r"[A-Za-z_]+|\d+|[^\sA-Za-z_\d]", code)]
+        return [
+            token if keyword.iskeyword(token) else "NAME"
+            if re.fullmatch(r"[A-Za-z_]+", token)
+            else "NUMBER"
+            if token.isdigit()
+            else token
+            for token in re.findall(r"[A-Za-z_]+|\d+|[^\sA-Za-z_\d]", code)
+        ]
 
 
 def _shingles(tokens: list[str], size: int) -> set[str]:
@@ -295,7 +298,15 @@ def _shingles(tokens: list[str], size: int) -> set[str]:
         return set()
     if len(tokens) < size:
         return {" ".join(tokens)}
-    return {" ".join(tokens[index : index + size]) for index in range(0, len(tokens) - size + 1)}
+    return {" ".join(tokens[index : index + size]) for index in range(len(tokens) - size + 1)}
+
+
+def _bucket(entry: DiversityEntry) -> str:
+    return entry.cwe or entry.mode or "unknown"
+
+
+def _entry_id(entry: DiversityEntry) -> str:
+    return entry.sample_id or entry.exact_pair_hash
 
 
 def _count_values(values: Any) -> dict[str, int]:

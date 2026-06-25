@@ -1,0 +1,6 @@
+# Install only in the Lab 3 vudenc Conda environment, not the generator .venv.
+numpy
+gensim
+scikit-learn
+tensorflow
+joblib
