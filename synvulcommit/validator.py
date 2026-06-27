@@ -12,9 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from .cwe_registry import all_semgrep_rule_ids, get_cwe
+from .generation_profile import (
+    WINDOW_BALANCED_MAX_BADPART_RATIO,
+    WINDOW_BALANCED_MAX_TOKENS,
+    WINDOW_BALANCED_MIN_FIXED_TOKEN_RETENTION,
+    WINDOW_BALANCED_MIN_TOKENS,
+    is_window_balanced,
+)
 from .llm_generator import GeneratedCommit
 from .spec_sampler import GenerationSpec
 from .structural_checks import run_structural_checks
+from .windowing import analyze_window_balance
 
 
 @dataclass
@@ -38,9 +46,13 @@ class ValidationResult:
     bandit_after: ToolRun
     semgrep_before: ToolRun
     semgrep_after: ToolRun
+    window_balance: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if data["window_balance"] is None:
+            data.pop("window_balance")
+        return data
 
 
 def validate_candidate(
@@ -60,6 +72,9 @@ def validate_candidate(
     structural_result = run_structural_checks(spec, candidate.vulnerable_code, candidate.fixed_code)
     if not structural_result.passed:
         reasons.extend(structural_result.reasons)
+    window_balance = _window_balance_summary(candidate) if is_window_balanced(spec.generation_profile) else None
+    if window_balance is not None:
+        _validate_window_balance(window_balance, reasons)
 
     temp_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="synvulcommit_", dir=temp_root) as tmp:
@@ -114,7 +129,42 @@ def validate_candidate(
         bandit_after=bandit_after,
         semgrep_before=semgrep_before,
         semgrep_after=semgrep_after,
+        window_balance=window_balance,
     )
+
+
+def _window_balance_summary(candidate: GeneratedCommit) -> dict[str, Any]:
+    summary = analyze_window_balance(candidate.vulnerable_code, candidate.badparts, candidate.fixed_code)
+    vulnerable_tokens = int(summary["vulnerable_token_count"])
+    fixed_tokens = int(summary["fixed_token_count"])
+    fixed_retention = round(fixed_tokens / vulnerable_tokens, 6) if vulnerable_tokens else 0.0
+    return {**summary, "fixed_token_retention": fixed_retention}
+
+
+def _validate_window_balance(summary: dict[str, Any], reasons: list[str]) -> None:
+    vulnerable_tokens = int(summary.get("vulnerable_token_count") or 0)
+    if vulnerable_tokens < WINDOW_BALANCED_MIN_TOKENS:
+        reasons.append(
+            f"window-balanced vulnerable code has too few code tokens: {vulnerable_tokens} < {WINDOW_BALANCED_MIN_TOKENS}"
+        )
+    if vulnerable_tokens > WINDOW_BALANCED_MAX_TOKENS:
+        reasons.append(
+            f"window-balanced vulnerable code has too many code tokens: {vulnerable_tokens} > {WINDOW_BALANCED_MAX_TOKENS}"
+        )
+    if int(summary.get("positive_window_count") or 0) < 1:
+        reasons.append("window-balanced vulnerable code has no positive 200-token window")
+    if int(summary.get("negative_window_count") or 0) < 1:
+        reasons.append("window-balanced vulnerable code has no negative 200-token window")
+    badpart_ratio = float(summary.get("badpart_token_ratio") or 0.0)
+    if badpart_ratio > WINDOW_BALANCED_MAX_BADPART_RATIO:
+        reasons.append(
+            f"window-balanced badparts cover too much source: {badpart_ratio:.3f} > {WINDOW_BALANCED_MAX_BADPART_RATIO:.3f}"
+        )
+    fixed_retention = float(summary.get("fixed_token_retention") or 0.0)
+    if fixed_retention < WINDOW_BALANCED_MIN_FIXED_TOKEN_RETENTION:
+        reasons.append(
+            f"window-balanced fixed code retains too little source: {fixed_retention:.3f} < {WINDOW_BALANCED_MIN_FIXED_TOKEN_RETENTION:.3f}"
+        )
 
 
 def _run_bandit(path: Path) -> ToolRun:
@@ -256,6 +306,17 @@ def _run_command(
 
 
 def _find_semgrep() -> tuple[str, Path | None]:
+    configured = os.environ.get("SYNVUL_SEMGREP")
+    if configured:
+        configured_path = Path(configured)
+        scripts_dir = configured_path.parent if configured_path.parent.exists() else None
+        return configured, scripts_dir
+
+    project_scripts = Path(__file__).resolve().parents[1] / ".venv" / "Scripts"
+    project_exe = project_scripts / "semgrep.exe"
+    if project_exe.exists():
+        return str(project_exe), project_scripts
+
     found = shutil.which("semgrep")
     if found:
         return found, None

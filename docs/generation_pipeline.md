@@ -18,6 +18,32 @@ Each generation run follows the same stages:
 
 The generator treats `--per-cwe` as the target accepted count per CWE. Existing accepted records in the selected output directory count toward the target, so rerunning a partial output resumes from the remaining deficit.
 
+## Generation Profiles
+
+The default generation profile is `compact`. It keeps the existing small-file prompt and validation behavior used for the current corpus.
+
+`window_balanced` is an opt-in profile for later datasets intended to work better with the Lab 3/VUDENC 200-token windowing setup. It changes prompt requirements and validation:
+
+- vulnerable modules should contain 420-900 code tokens,
+- there must be clean security-neutral context before and after the vulnerable region,
+- badparts must remain localized and cover no more than 15% of vulnerable source tokens,
+- the vulnerable source must produce at least one positive and one negative 200-token window,
+- the fixed source must retain at least 75% of the vulnerable source token count,
+- `single_function` quota slots are excluded because they conflict with surrounding clean context.
+
+Use:
+
+```powershell
+.\.venv\Scripts\python -m synvulcommit.run_generation `
+  --output output_window_balanced_v1 `
+  --provider openai_compatible `
+  --require-tools `
+  --generation-profile window_balanced `
+  --per-cwe 100
+```
+
+The profile is stored in internal records and summarized safely in `metadata.jsonl`. The clean `plain_<mode>` VUDENC files are unchanged.
+
 ## Supported Modes
 
 SynVulCommit covers the seven VUDENC-style vulnerability modes:

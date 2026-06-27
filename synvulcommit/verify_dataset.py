@@ -10,6 +10,7 @@ from typing import Any
 from .cwe_registry import all_cwes, all_semgrep_rule_ids
 from .diversity import DiversityIndex
 from .export_vudenc import build_export_payloads
+from .generation_profile import WINDOW_BALANCED_PROFILE
 from .spec_sampler import CONTEXT_DIMENSIONS
 from .storage import read_jsonl
 
@@ -154,6 +155,10 @@ def _validation_summary(records: list[dict[str, Any]]) -> tuple[dict[str, Any], 
             structural["missing"] += 1
             errors.append(_issue("missing_validation", sample_id=sample_id, mode=mode))
             continue
+        if _record_generation_profile(record) == WINDOW_BALANCED_PROFILE and not isinstance(
+            validation.get("window_balance"), dict
+        ):
+            errors.append(_issue("missing_window_balance_validation", sample_id=sample_id, mode=mode))
 
         if validation.get("passed") is True:
             overall["passed"] += 1
@@ -499,6 +504,11 @@ def _normalize_synvul_rule_id(check_id: str) -> str:
 def _record_mode(record: dict[str, Any]) -> str:
     context = record.get("context") if isinstance(record.get("context"), dict) else {}
     return _safe_value(record.get("mode") or context.get("mode") or context.get("cwe_key"))
+
+
+def _record_generation_profile(record: dict[str, Any]) -> str:
+    context = record.get("context") if isinstance(record.get("context"), dict) else {}
+    return _safe_value(record.get("generation_profile") or context.get("generation_profile") or "compact")
 
 
 def _plain_commit_count(plain: dict[str, Any]) -> int:

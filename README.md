@@ -54,6 +54,14 @@ $env:SYNVUL_MODEL="deepseek-chat"
   --per-cwe 2
 ```
 
+Generation defaults to the compact profile used by the current datasets. To request longer modules for later window-balanced experiments, add:
+
+```powershell
+--generation-profile window_balanced
+```
+
+This profile is stricter and slower because accepted samples must contain 420-900 code tokens, localized badparts, and at least one positive and one negative 200-token source window.
+
 Verify an existing generated dataset:
 
 ```powershell

@@ -10,6 +10,7 @@ from typing import Any
 
 from .diversity import DiversityIndex, write_diversity_summary
 from .export_vudenc import export_records
+from .generation_profile import COMPACT_PROFILE, GENERATION_PROFILES
 from .llm_generator import GenerationError, generate_commit, validate_provider_configuration
 from .prompt_builder import build_prompt
 from .reviewer import review_candidate, review_error, review_not_run, validate_reviewer_configuration
@@ -31,6 +32,12 @@ def main() -> int:
     parser.add_argument("--output", default="output", help="Output directory.")
     parser.add_argument("--seed", type=int, default=1337, help="Random seed for task sampling.")
     parser.add_argument("--max-attempts", type=int, default=5, help="Generation attempts per requested spec.")
+    parser.add_argument(
+        "--generation-profile",
+        choices=GENERATION_PROFILES,
+        default=COMPACT_PROFILE,
+        help="Generation shape profile. Use window_balanced for larger files with clean 200-token windows.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -79,6 +86,7 @@ def main() -> int:
             seed=args.seed,
             existing_records=existing_records,
             cwe_filters=args.cwe,
+            generation_profile=args.generation_profile,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -180,6 +188,7 @@ class _GenerationState:
                 self.rejected_path,
                 {
                     "context": spec.to_dict(),
+                    "generation_profile": spec.generation_profile,
                     "attempt": attempt,
                     "provider": self.provider,
                     "review": review_not_run(self.review_enabled),
@@ -422,6 +431,7 @@ def _build_record(
         "cwe_name": spec.cwe_name,
         "mode": spec.mode,
         "context": spec.to_dict(),
+        "generation_profile": spec.generation_profile,
         "attempt": attempt,
         "commit_message": candidate.commit_message,
         "filename": candidate.filename,

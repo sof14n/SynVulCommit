@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 import unittest
 
+from synvulcommit.generation_profile import WINDOW_BALANCED_PROFILE
 from synvulcommit.spec_sampler import FLOW_PATTERNS_BY_STRUCTURE, build_coverage_plan
 
 
@@ -94,11 +95,33 @@ class CoveragePlanTests(unittest.TestCase):
         self.assertEqual(1, summary["existing_accepted"])
         self.assertEqual({"Flask": 1}, {key: value for key, value in summary["distributions"]["application_type"].items() if value})
 
+    def test_resume_counts_only_records_from_the_selected_generation_profile(self) -> None:
+        compact_records = [_sql_record(index) for index in range(2)]
+
+        compact_plan = build_coverage_plan(2, 1337, compact_records, ["sql"])
+        window_plan = build_coverage_plan(2, 1337, compact_records, ["sql"], generation_profile=WINDOW_BALANCED_PROFILE)
+
+        self.assertEqual([], compact_plan.specs)
+        self.assertEqual(2, compact_plan.summary()["sql"]["existing_accepted"])
+        self.assertEqual(2, len(window_plan.specs))
+        self.assertEqual(0, window_plan.summary()["sql"]["existing_accepted"])
+
     def test_unknown_cwe_filter_reports_no_match(self) -> None:
         plan = build_coverage_plan(1, 1337, [], ["not-a-cwe"])
 
         self.assertFalse(plan.matched)
         self.assertEqual([], plan.specs)
+
+    def test_window_balanced_profile_excludes_single_function_slots(self) -> None:
+        first = build_coverage_plan(12, 1337, [], ["sql"], generation_profile=WINDOW_BALANCED_PROFILE)
+        second = build_coverage_plan(12, 1337, [], ["sql"], generation_profile=WINDOW_BALANCED_PROFILE)
+        compatible = first.coverage_by_mode["sql"].compatible_tuples
+
+        self.assertEqual([spec.to_dict() for spec in first.specs], [spec.to_dict() for spec in second.specs])
+        self.assertTrue(first.specs)
+        self.assertTrue(all(spec.generation_profile == WINDOW_BALANCED_PROFILE for spec in first.specs))
+        self.assertNotIn("single_function", {item[2] for item in compatible})
+        self.assertNotIn("single_function", {spec.structure for spec in first.specs})
 
 
 def _sql_record(index: int) -> dict[str, object]:

@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+from .windowing import badpart_spans, token_matches, window_start_indexes
 
 
 CANONICAL_MODES = (
@@ -23,7 +24,6 @@ CANONICAL_MODES = (
 )
 MODE_ALIASES = {"path_disclosure": "directory_traversal"}
 CONTEXT_FIELDS = ("application_type", "flow_pattern", "difficulty", "structure")
-TOKEN_RE = re.compile(r"[A-Za-z_]\w*|\d+(?:\.\d+)?|==|!=|<=|>=|//|<<|>>|\*\*|[^\s]")
 
 
 @dataclass(frozen=True)
@@ -210,16 +210,12 @@ def split_commits(records: Iterable[CommitRecord], seed: int) -> dict[str, str]:
 
 
 def token_windows(record: CommitRecord, window_size: int = 200, stride: int = 5) -> list[dict[str, Any]]:
-    matches = list(TOKEN_RE.finditer(record.source))
+    matches = token_matches(record.source)
     if not matches:
         return []
-    spans = _badpart_spans(record.source, record.badparts)
+    spans = badpart_spans(record.source, record.badparts)
     windows: list[dict[str, Any]] = []
-    starts = list(range(0, max(1, len(matches) - window_size + 1), stride))
-    last_start = max(0, len(matches) - window_size)
-    if last_start not in starts:
-        starts.append(last_start)
-    for start in starts:
+    for start in window_start_indexes(len(matches), window_size, stride):
         tokens = matches[start : start + window_size]
         if not tokens:
             continue
@@ -261,18 +257,6 @@ def cap_windows(
         )
         selected.extend(ranked[:maximum])
     return selected
-
-
-def _badpart_spans(source: str, badparts: Iterable[str]) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    for part in badparts:
-        if not part:
-            continue
-        position = source.find(part)
-        while position >= 0:
-            spans.append((position, position + len(part)))
-            position = source.find(part, position + max(1, len(part)))
-    return spans
 
 
 def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:

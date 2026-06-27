@@ -35,6 +35,7 @@ class VudencExportTests(unittest.TestCase):
         self.assertEqual("plain_sql", row["plain_file"])
         self.assertEqual(1, row["row_index"])
         self.assertEqual("api/users.py", row["filename"])
+        self.assertEqual("compact", row["generation_profile"])
         self.assertEqual(
             {
                 "cwe_key": "sql",
@@ -82,6 +83,48 @@ class VudencExportTests(unittest.TestCase):
             metadata = _read_jsonl(out_dir / "metadata.jsonl")
 
         self.assertEqual({"provider": "openai_compatible", "attempt": 1}, metadata[0]["provenance"])
+
+    def test_metadata_includes_sanitized_window_balance_summary_without_plain_export_changes(self) -> None:
+        record = _record()
+        record["generation_profile"] = "window_balanced"
+        record["context"]["generation_profile"] = "window_balanced"
+        record["validation"]["window_balance"] = {
+            "window_size": 200,
+            "stride": 5,
+            "vulnerable_token_count": 500,
+            "fixed_token_count": 490,
+            "positive_window_count": 4,
+            "negative_window_count": 20,
+            "badpart_token_count": 12,
+            "badpart_token_ratio": 0.024,
+            "fixed_token_retention": 0.98,
+            "unsafe": "C:\\Users\\Lenovo\\secret-token",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "vudenc"
+            export_records([record], out_dir)
+            plain = json.loads((out_dir / "plain_sql").read_text(encoding="utf-8"))
+            metadata = _read_jsonl(out_dir / "metadata.jsonl")
+
+        commit = plain["synvulcommit/sql"]["CWE-89_sql_000001"]
+        self.assertEqual({"msg", "files"}, set(commit))
+        self.assertNotIn("generation_profile", json.dumps(plain))
+        self.assertEqual("window_balanced", metadata[0]["generation_profile"])
+        self.assertEqual(
+            {
+                "window_size": 200,
+                "stride": 5,
+                "vulnerable_token_count": 500,
+                "fixed_token_count": 490,
+                "positive_window_count": 4,
+                "negative_window_count": 20,
+                "badpart_token_count": 12,
+                "badpart_token_ratio": 0.024,
+                "fixed_token_retention": 0.98,
+            },
+            metadata[0]["validation_summary"]["window_balance"],
+        )
+        self.assertNotIn("secret-token", json.dumps(metadata))
 
     def test_unsafe_commit_message_is_replaced(self) -> None:
         record = _record()

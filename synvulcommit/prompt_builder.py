@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .cwe_registry import get_cwe
+from .generation_profile import WINDOW_BALANCED_PROFILE, normalize_generation_profile
 from .spec_sampler import GenerationSpec
 
 
@@ -11,10 +12,12 @@ def build_prompt(spec: GenerationSpec) -> str:
     prompt_hints = "\n".join(f"- {item}" for item in definition.prompt_hints)
     context_requirements = _context_requirements(spec)
     diversity_requirement = _diversity_requirement(spec)
+    profile = normalize_generation_profile(spec.generation_profile)
+    profile_requirement = _profile_requirement(profile)
 
     return f"""You are generating a defensive research dataset item for Python vulnerability detection.
 
-Generate exactly one small, realistic Python security-fix commit.
+Generate exactly one {_commit_size_descriptor(profile)} Python security-fix commit.
 
 Task specification:
 - CWE: {spec.cwe} ({spec.cwe_name})
@@ -22,6 +25,7 @@ Task specification:
 - Data-flow pattern: {spec.flow_pattern}
 - Difficulty: {spec.difficulty}
 - Program structure: {spec.structure}
+- Generation profile: {profile}
 
 The vulnerable version must satisfy:
 {vulnerable_requirements}
@@ -51,9 +55,8 @@ Required JSON object:
 }}
 
 Constraints:
-- Keep each version under 55 lines and 2,800 characters.
+{profile_requirement}
 - The vulnerable and fixed files must be syntactically valid Python.
-- Keep the example self-contained and toy-sized.
 - Do not add database schema setup, seed data, test code, or an `if __name__ == "__main__"` block just to make the example runnable.
 - vulnerable_lines and fixed_lines must contain exact source-code lines, not line numbers.
 - Do not add comments that label code as vulnerable, insecure, fixed, or safe.
@@ -62,6 +65,31 @@ Constraints:
 - Generate exactly one vulnerability category: do not add unrelated vulnerable sinks, disabled protections, or security-sensitive flows for another SynVulCommit CWE.
 - The fixed version must not retain or introduce any other SynVulCommit CWE pattern.
 """
+
+
+def _commit_size_descriptor(profile: str) -> str:
+    if profile == WINDOW_BALANCED_PROFILE:
+        return "realistic medium-sized"
+    return "small, realistic"
+
+
+def _profile_requirement(profile: str) -> str:
+    if profile == WINDOW_BALANCED_PROFILE:
+        return "\n".join(
+            (
+                "- Build each version as a realistic 420-900 code-token module.",
+                "- Include clean, security-neutral code before and after the vulnerable region so 200-token windows can contain both vulnerable and clean examples.",
+                "- Keep the vulnerable/fixed change localized to the requested CWE; the changed vulnerable lines should be a small minority of the file.",
+                "- Use realistic helper functions, classes, parsing, routing, validation, or formatting logic; do not add filler comments, dead padding, repeated no-op assignments, or unused toy functions.",
+                "- The fixed version must preserve almost all surrounding clean context and should not shrink the module substantially.",
+            )
+        )
+    return "\n".join(
+        (
+            "- Keep each version under 55 lines and 2,800 characters.",
+            "- Keep the example self-contained and toy-sized.",
+        )
+    )
 
 
 def _context_requirements(spec: GenerationSpec) -> str:

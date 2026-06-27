@@ -125,6 +125,36 @@ class DatasetVerificationTests(unittest.TestCase):
         self.assertIn("missing_validation", {item["code"] for item in failed_report["errors"]})
         self.assertIn("failed_validation", {item["code"] for item in failed_report["errors"]})
 
+    def test_window_balanced_accepted_record_requires_window_balance_validation(self) -> None:
+        record = _record("CWE-89_sql_000001")
+        record["generation_profile"] = "window_balanced"
+        record["context"]["generation_profile"] = "window_balanced"
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "vudenc"
+            export_records([record], out_dir)
+            report = verify_dataset([record], [], out_dir)
+
+        self.assertEqual("fail", report["status"])
+        self.assertIn("missing_window_balance_validation", {item["code"] for item in report["errors"]})
+
+        record["validation"]["window_balance"] = {
+            "window_size": 200,
+            "stride": 5,
+            "vulnerable_token_count": 500,
+            "fixed_token_count": 480,
+            "positive_window_count": 2,
+            "negative_window_count": 5,
+            "badpart_token_count": 10,
+            "badpart_token_ratio": 0.02,
+            "fixed_token_retention": 0.96,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "vudenc"
+            export_records([record], out_dir)
+            clean_report = verify_dataset([record], [], out_dir)
+
+        self.assertEqual("pass", clean_report["status"])
+
     def test_post_fix_synvul_semgrep_finding_fails_verification(self) -> None:
         record = _record("CWE-89_sql_000001")
         record["validation"]["semgrep_after"] = {

@@ -72,12 +72,14 @@ Allowed sidecar fields include:
 - repository and commit id aliases used in the export,
 - filename,
 - generation context,
+- generation profile,
 - provider/model when present,
 - prompt hash,
 - seed,
 - attempt,
 - generation timestamp,
 - validation pass state and safe summaries,
+- optional window-balance summary for `window_balanced` records,
 - Bandit/Semgrep statuses and safe rule ids,
 - reviewer verdict summary.
 

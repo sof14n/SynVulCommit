@@ -1,4 +1,4 @@
-"""Train controlled A/B/C Word2Vec models on a prepared experiment release.
+"""Train controlled A/B/C models on a prepared experiment release.
 
 Run this module from the Lab 3 ``vudenc`` Conda environment. Dependencies are
 loaded lazily so dataset preparation does not require TensorFlow or Gensim.
@@ -18,6 +18,15 @@ from typing import Any
 
 from .experiment_data import CANONICAL_MODES, read_jsonl
 
+WORD2VEC_MODELS = ("lstm", "mlp", "random_forest", "cnn")
+TRANSFORMER_MODEL_SPECS = {
+    "lstm_codebert": ("microsoft/codebert-base", "lstm"),
+    "cnn_codebert": ("microsoft/codebert-base", "cnn"),
+    "lstm_graphcodebert": ("microsoft/graphcodebert-base", "lstm"),
+    "cnn_graphcodebert": ("microsoft/graphcodebert-base", "cnn"),
+}
+MODEL_CHOICES = WORD2VEC_MODELS + tuple(TRANSFORMER_MODEL_SPECS)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,12 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--word2vec", type=Path, default=Path("../w2v/word2vec_withString10-300-200.model"))
     parser.add_argument("--word2vec-corpus", type=Path, default=Path("../w2v/pythontraining.txt"))
-    parser.add_argument("--models", nargs="+", choices=("lstm", "mlp", "random_forest", "cnn"), default=("lstm", "mlp", "random_forest", "cnn"))
+    parser.add_argument("--models", nargs="+", choices=MODEL_CHOICES, default=WORD2VEC_MODELS)
     parser.add_argument("--conditions", nargs="+", choices=("A", "B", "C"), default=("A", "B", "C"))
     parser.add_argument("--modes", nargs="+", choices=CANONICAL_MODES, default=CANONICAL_MODES)
     parser.add_argument("--seed", type=int, default=20260624)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--transformer-batch-size", type=int, default=16)
     parser.add_argument("--smoke", action="store_true", help="Run one epoch/tree per selected model for CPU verification.")
     return parser
 
@@ -79,6 +89,37 @@ def vectorize(rows: list[dict[str, Any]], keyed_vectors: Any, np: Any, sequence:
     return features, labels
 
 
+def _text_for_transformer(row: dict[str, Any]) -> str:
+    return " ".join(row["tokens"][:200])
+
+
+def transformer_vectorize(
+    rows: list[dict[str, Any]],
+    tokenizer: Any,
+    model: Any,
+    torch: Any,
+    np: Any,
+    batch_size: int,
+) -> tuple[Any, Any]:
+    dimension = int(model.config.hidden_size)
+    features = np.zeros((len(rows), 200, dimension), dtype="float32")
+    labels = np.asarray([int(row["label"]) for row in rows], dtype="int32")
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
+            encoded = tokenizer(
+                [_text_for_transformer(row) for row in batch],
+                padding="max_length",
+                truncation=True,
+                max_length=200,
+                return_tensors="pt",
+            )
+            outputs = model(**encoded)
+            features[start:start + len(batch)] = outputs.last_hidden_state.cpu().numpy()
+    return features, labels
+
+
 def _f1_callback(tf: Any) -> Any:
     class ValidationF1(tf.keras.callbacks.Callback):
         def __init__(self, validation_data: tuple[Any, Any]) -> None:
@@ -114,6 +155,23 @@ def build_neural_model(model_name: str, tf: Any, embedding_matrix: Any) -> Any:
         x = tf.keras.layers.Dropout(0.2)(x)
     else:
         raise ValueError(f"not a neural sequence model: {model_name}")
+    outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+    model = tf.keras.Model(inputs, outputs)
+    model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+
+def build_transformer_neural_model(architecture: str, tf: Any, embedding_dimension: int) -> Any:
+    inputs = tf.keras.Input(shape=(200, embedding_dimension), dtype="float32")
+    if architecture == "lstm":
+        x = tf.keras.layers.LSTM(100, dropout=0.2)(inputs)
+    elif architecture == "cnn":
+        x = tf.keras.layers.Conv1D(128, 5, activation="relu")(inputs)
+        x = tf.keras.layers.GlobalMaxPooling1D()(x)
+        x = tf.keras.layers.Dense(128, activation="relu")(x)
+        x = tf.keras.layers.Dropout(0.2)(x)
+    else:
+        raise ValueError(f"not a transformer neural architecture: {architecture}")
     outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
     model = tf.keras.Model(inputs, outputs)
     model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
@@ -205,6 +263,19 @@ def load_or_rebuild_word2vec(Word2Vec: Any, source: Path, corpus: Path, out: Pat
         return model.wv
 
 
+def _load_transformer_components(model_id: str) -> tuple[Any, Any, Any]:
+    try:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+    except ImportError as exc:
+        raise SystemExit(
+            "Transformer experiment dependencies are missing. Install torch and transformers in the Lab experiment Conda environment."
+        ) from exc
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModel.from_pretrained(model_id)
+    return tokenizer, model, torch
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     joblib, np, tf, Word2Vec, metrics = _dependencies()
@@ -212,14 +283,19 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or args.prepared / "results"
     out.mkdir(parents=True, exist_ok=True)
     rows = read_jsonl(args.prepared / "manifests" / "windows.jsonl")
-    word2vec = load_or_rebuild_word2vec(Word2Vec, args.word2vec, args.word2vec_corpus, out, args.seed)
-    embeddings = embedding_matrix(word2vec, np)
+    needs_word2vec = any(model_name in WORD2VEC_MODELS for model_name in args.models)
+    word2vec = load_or_rebuild_word2vec(Word2Vec, args.word2vec, args.word2vec_corpus, out, args.seed) if needs_word2vec else None
+    embeddings = embedding_matrix(word2vec, np) if word2vec is not None else None
     results: list[dict[str, Any]] = []
     feature_cache: dict[tuple[str, str, str, bool], tuple[Any, Any]] = {}
+    transformer_components: dict[str, tuple[Any, Any, Any]] = {}
+    transformer_feature_cache: dict[tuple[str, str, str, str], tuple[Any, Any]] = {}
 
     def features(dataset: str, mode: str, split: str, sequence: bool) -> tuple[Any, Any]:
         key = (dataset, mode, split, sequence)
         if key not in feature_cache:
+            if word2vec is None:
+                raise RuntimeError("Word2Vec features requested without loading Word2Vec")
             values, labels = vectorize(_rows_for(rows, dataset, mode, split), word2vec, np, sequence)
             feature_cache[key] = (values, labels)
             representation = "token_ids" if sequence else "mean_word2vec"
@@ -231,6 +307,32 @@ def main(argv: list[str] | None = None) -> int:
                 np,
             )
         return feature_cache[key]
+
+    def transformer_features(dataset: str, mode: str, split: str, model_id: str) -> tuple[Any, Any]:
+        key = (dataset, mode, split, model_id)
+        if key not in transformer_feature_cache:
+            if model_id not in transformer_components:
+                print(f"loading transformer model {model_id}")
+                transformer_components[model_id] = _load_transformer_components(model_id)
+            tokenizer, model, torch = transformer_components[model_id]
+            values, labels = transformer_vectorize(
+                _rows_for(rows, dataset, mode, split),
+                tokenizer,
+                model,
+                torch,
+                np,
+                args.transformer_batch_size,
+            )
+            transformer_feature_cache[key] = (values, labels)
+            representation = model_id.replace("/", "_").replace("-", "_")
+            _write_feature_cache(
+                out / "feature_cache",
+                f"{mode}_{dataset}_{split}_{representation}_sequence",
+                values,
+                labels,
+                np,
+            )
+        return transformer_feature_cache[key]
 
     for mode in args.modes:
         real_train = _rows_for(rows, "real", mode, "train")
@@ -244,20 +346,52 @@ def main(argv: list[str] | None = None) -> int:
         for condition in args.conditions:
             train_rows, validation_rows = conditions[condition]
             for model_name in args.models:
-                sequence = model_name in {"lstm", "cnn"}
-                if condition == "C":
-                    real_features, real_labels = features("real", mode, "train", sequence)
-                    synthetic_features, synthetic_labels = features("synthetic", mode, "train", sequence)
-                    x_train = np.concatenate((real_features, synthetic_features))
-                    y_train = np.concatenate((real_labels, synthetic_labels))
-                else:
-                    dataset = "real" if condition == "A" else "synthetic"
-                    x_train, y_train = features(dataset, mode, "train", sequence)
                 validation_dataset = "real" if condition in {"A", "C"} else "synthetic"
-                x_validation, y_validation = features(validation_dataset, mode, "validation", sequence)
-                x_test, y_test = features("real", mode, "test", sequence)
                 cache_name = f"{mode}_{condition}_{model_name}"
-                if model_name in {"lstm", "cnn"}:
+                if model_name in TRANSFORMER_MODEL_SPECS:
+                    model_id, architecture = TRANSFORMER_MODEL_SPECS[model_name]
+                    if condition == "C":
+                        real_features, real_labels = transformer_features("real", mode, "train", model_id)
+                        synthetic_features, synthetic_labels = transformer_features("synthetic", mode, "train", model_id)
+                        x_train = np.concatenate((real_features, synthetic_features))
+                        y_train = np.concatenate((real_labels, synthetic_labels))
+                    else:
+                        dataset = "real" if condition == "A" else "synthetic"
+                        x_train, y_train = transformer_features(dataset, mode, "train", model_id)
+                    x_validation, y_validation = transformer_features(validation_dataset, mode, "validation", model_id)
+                    x_test, y_test = transformer_features("real", mode, "test", model_id)
+                    model = build_transformer_neural_model(architecture, tf, x_train.shape[-1])
+                    callback_type = _f1_callback(tf)
+                    callbacks = [
+                        callback_type((x_validation, y_validation)),
+                        tf.keras.callbacks.EarlyStopping(monitor="val_f1", mode="max", patience=10, restore_best_weights=True),
+                    ]
+                    model.fit(
+                        x_train, y_train,
+                        validation_data=(x_validation, y_validation),
+                        epochs=1 if args.smoke else args.epochs,
+                        batch_size=args.batch_size,
+                        verbose=0,
+                        callbacks=callbacks,
+                    )
+                    predicted = (model.predict(x_test, verbose=0).ravel() >= 0.5).astype("int32")
+                    model_path = out / "models" / f"{cache_name}.keras"
+                    model_path.parent.mkdir(parents=True, exist_ok=True)
+                    model.save(model_path)
+                elif model_name in {"lstm", "cnn"}:
+                    if embeddings is None:
+                        raise RuntimeError("Word2Vec neural model requested without loading embeddings")
+                    sequence = True
+                    if condition == "C":
+                        real_features, real_labels = features("real", mode, "train", sequence)
+                        synthetic_features, synthetic_labels = features("synthetic", mode, "train", sequence)
+                        x_train = np.concatenate((real_features, synthetic_features))
+                        y_train = np.concatenate((real_labels, synthetic_labels))
+                    else:
+                        dataset = "real" if condition == "A" else "synthetic"
+                        x_train, y_train = features(dataset, mode, "train", sequence)
+                    x_validation, y_validation = features(validation_dataset, mode, "validation", sequence)
+                    x_test, y_test = features("real", mode, "test", sequence)
                     model = build_neural_model(model_name, tf, embeddings)
                     callback_type = _f1_callback(tf)
                     callbacks = [
@@ -279,6 +413,15 @@ def main(argv: list[str] | None = None) -> int:
                 elif model_name == "mlp":
                     from sklearn.neural_network import MLPClassifier
 
+                    if condition == "C":
+                        real_features, real_labels = features("real", mode, "train", False)
+                        synthetic_features, synthetic_labels = features("synthetic", mode, "train", False)
+                        x_train = np.concatenate((real_features, synthetic_features))
+                        y_train = np.concatenate((real_labels, synthetic_labels))
+                    else:
+                        dataset = "real" if condition == "A" else "synthetic"
+                        x_train, y_train = features(dataset, mode, "train", False)
+                    x_test, y_test = features("real", mode, "test", False)
                     model = MLPClassifier(
                         hidden_layer_sizes=(256, 128), activation="relu", solver="adam",
                         max_iter=1 if args.smoke else 500, random_state=args.seed,
@@ -291,6 +434,15 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     from sklearn.ensemble import RandomForestClassifier
 
+                    if condition == "C":
+                        real_features, real_labels = features("real", mode, "train", False)
+                        synthetic_features, synthetic_labels = features("synthetic", mode, "train", False)
+                        x_train = np.concatenate((real_features, synthetic_features))
+                        y_train = np.concatenate((real_labels, synthetic_labels))
+                    else:
+                        dataset = "real" if condition == "A" else "synthetic"
+                        x_train, y_train = features(dataset, mode, "train", False)
+                    x_test, y_test = features("real", mode, "test", False)
                     model = RandomForestClassifier(
                         n_estimators=1 if args.smoke else 300, class_weight="balanced",
                         random_state=args.seed, n_jobs=-1,

@@ -13,6 +13,9 @@ from .diff_utils import extract_changed_parts, make_unified_diff
 from .spec_sampler import GenerationSpec
 
 
+MAX_COMPLETION_TOKENS_LIMIT = 384_000
+
+
 class GenerationError(RuntimeError):
     pass
 
@@ -377,8 +380,8 @@ def _max_completion_tokens(prefix: str = "SYNVUL_") -> int:
         value = int(raw_value)
     except ValueError as exc:
         raise GenerationError(f"{prefix}MAX_TOKENS must be an integer") from exc
-    if not 256 <= value <= 8192:
-        raise GenerationError(f"{prefix}MAX_TOKENS must be between 256 and 8192")
+    if not 256 <= value <= MAX_COMPLETION_TOKENS_LIMIT:
+        raise GenerationError(f"{prefix}MAX_TOKENS must be between 256 and {MAX_COMPLETION_TOKENS_LIMIT}")
     return value
 
 
@@ -423,18 +426,14 @@ from flask import Flask, request
 app = Flask(__name__)
 
 
-def find_account(username):
+@app.get("/account")
+def account():
+    username = request.args.get("username", "")
     db = sqlite3.connect("accounts.db")
     cursor = db.cursor()
     query = f"SELECT id, email FROM accounts WHERE username = '{username}'"
     cursor.execute(query)
-    return cursor.fetchall()
-
-
-@app.get("/account")
-def account():
-    username = request.args.get("username", "")
-    return {"accounts": find_account(username)}
+    return {"accounts": cursor.fetchall()}
 """,
         "fixed_code": """
 import sqlite3
@@ -443,17 +442,13 @@ from flask import Flask, request
 app = Flask(__name__)
 
 
-def find_account(username):
-    db = sqlite3.connect("accounts.db")
-    cursor = db.cursor()
-    cursor.execute("SELECT id, email FROM accounts WHERE username = ?", (username,))
-    return cursor.fetchall()
-
-
 @app.get("/account")
 def account():
     username = request.args.get("username", "")
-    return {"accounts": find_account(username)}
+    db = sqlite3.connect("accounts.db")
+    cursor = db.cursor()
+    cursor.execute("SELECT id, email FROM accounts WHERE username = ?", (username,))
+    return {"accounts": cursor.fetchall()}
 """,
         "vulnerable_lines": ["query = f\"SELECT id, email FROM accounts WHERE username = '{username}'\"", "cursor.execute(query)"],
         "fixed_lines": ["cursor.execute(\"SELECT id, email FROM accounts WHERE username = ?\", (username,))"],
@@ -580,34 +575,28 @@ def login():
 def _mock_remote_code_execution() -> dict[str, Any]:
     return {
         "commit_message": "Replace eval-based calculator with safe parser",
-        "filename": "api/calculator.py",
+        "filename": "views/calculator.py",
         "vulnerable_code": """
-from flask import Flask, request
-
-app = Flask(__name__)
+from django.http import JsonResponse
 
 
-@app.get("/calc")
-def calculate():
-    expression = request.args.get("expr", "0")
-    return {"result": eval(expression)}
+def calculate(request):
+    expression = request.GET.get("expr", "0")
+    return JsonResponse({"result": eval(expression)})
 """,
         "fixed_code": """
 import ast
-from flask import Flask, request
-
-app = Flask(__name__)
+from django.http import JsonResponse
 
 
-@app.get("/calc")
-def calculate():
-    expression = request.args.get("expr", "0")
+def calculate(request):
+    expression = request.GET.get("expr", "0")
     value = ast.literal_eval(expression)
     if not isinstance(value, (int, float)):
-        return {"error": "number required"}, 400
-    return {"result": value}
+        return JsonResponse({"error": "number required"}, status=400)
+    return JsonResponse({"result": value})
 """,
-        "vulnerable_lines": ["return {\"result\": eval(expression)}"],
+        "vulnerable_lines": ["return JsonResponse({\"result\": eval(expression)})"],
         "fixed_lines": ["value = ast.literal_eval(expression)"],
     }
 

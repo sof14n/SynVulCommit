@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from synvulcommit.generation_profile import WINDOW_BALANCED_PROFILE
 from synvulcommit import validator
 from synvulcommit.llm_generator import GeneratedCommit
 from synvulcommit.spec_sampler import GenerationSpec
@@ -13,6 +14,78 @@ from synvulcommit.structural_checks import StructuralCheckResult
 
 
 class AnalyzerExecutionTests(unittest.TestCase):
+    def test_compact_profile_does_not_enforce_window_balance(self) -> None:
+        clean_bandit, semgrep_before, semgrep_after = _clean_tool_runs()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            validator, "run_structural_checks", return_value=StructuralCheckResult(True, [], [], [])
+        ), patch.object(validator, "_run_bandit_pair", return_value=(clean_bandit, clean_bandit)), patch.object(
+            validator, "_run_semgrep_pair", return_value=(semgrep_before, semgrep_after)
+        ):
+            result = validator.validate_candidate(_sql_spec(), _candidate(), Path(tmp), Path(tmp), require_tools=True)
+
+        self.assertTrue(result.passed, result.reasons)
+        self.assertIsNone(result.window_balance)
+
+    def test_window_balanced_profile_rejects_short_file(self) -> None:
+        clean_bandit, semgrep_before, semgrep_after = _clean_tool_runs()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            validator, "run_structural_checks", return_value=StructuralCheckResult(True, [], [], [])
+        ), patch.object(validator, "_run_bandit_pair", return_value=(clean_bandit, clean_bandit)), patch.object(
+            validator, "_run_semgrep_pair", return_value=(semgrep_before, semgrep_after)
+        ):
+            result = validator.validate_candidate(
+                _sql_spec(WINDOW_BALANCED_PROFILE),
+                _candidate(),
+                Path(tmp),
+                Path(tmp),
+                require_tools=True,
+            )
+
+        self.assertFalse(result.passed)
+        self.assertIsInstance(result.window_balance, dict)
+        self.assertTrue(any("too few code tokens" in reason for reason in result.reasons))
+        self.assertTrue(any("no negative 200-token window" in reason for reason in result.reasons))
+
+    def test_window_balanced_profile_accepts_long_localized_file(self) -> None:
+        clean_bandit, semgrep_before, semgrep_after = _clean_tool_runs()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            validator, "run_structural_checks", return_value=StructuralCheckResult(True, [], [], [])
+        ), patch.object(validator, "_run_bandit_pair", return_value=(clean_bandit, clean_bandit)), patch.object(
+            validator, "_run_semgrep_pair", return_value=(semgrep_before, semgrep_after)
+        ):
+            result = validator.validate_candidate(
+                _sql_spec(WINDOW_BALANCED_PROFILE),
+                _long_window_candidate(),
+                Path(tmp),
+                Path(tmp),
+                require_tools=True,
+            )
+
+        self.assertTrue(result.passed, result.reasons)
+        self.assertIsInstance(result.window_balance, dict)
+        self.assertGreaterEqual(result.window_balance["positive_window_count"], 1)
+        self.assertGreaterEqual(result.window_balance["negative_window_count"], 1)
+
+    def test_window_balanced_profile_rejects_overbroad_badparts(self) -> None:
+        clean_bandit, semgrep_before, semgrep_after = _clean_tool_runs()
+        candidate = _long_window_candidate()
+        candidate.badparts = candidate.vulnerable_code.splitlines()[:40]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            validator, "run_structural_checks", return_value=StructuralCheckResult(True, [], [], [])
+        ), patch.object(validator, "_run_bandit_pair", return_value=(clean_bandit, clean_bandit)), patch.object(
+            validator, "_run_semgrep_pair", return_value=(semgrep_before, semgrep_after)
+        ):
+            result = validator.validate_candidate(
+                _sql_spec(WINDOW_BALANCED_PROFILE),
+                candidate,
+                Path(tmp),
+                Path(tmp),
+                require_tools=True,
+            )
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("badparts cover too much source" in reason for reason in result.reasons))
+
     def test_cross_cwe_semgrep_finding_after_fix_rejects_candidate(self) -> None:
         before = validator.ToolRun("semgrep", True, "success", [], 1, [{"check_id": "synvul.cwe-89.sql-injection"}], None)
         after = validator.ToolRun("semgrep", True, "success", [], 1, [{"check_id": "synvul.cwe-352.csrf-disabled"}], None)
@@ -340,8 +413,10 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def _sql_spec() -> GenerationSpec:
-    return GenerationSpec("sql", "CWE-89", "SQL Injection", "sql", "Flask", "direct", "easy", "single_function", 0)
+def _sql_spec(profile: str = "compact") -> GenerationSpec:
+    structure = "multi_function" if profile == WINDOW_BALANCED_PROFILE else "single_function"
+    flow = "indirect" if profile == WINDOW_BALANCED_PROFILE else "direct"
+    return GenerationSpec("sql", "CWE-89", "SQL Injection", "sql", "Flask", flow, "easy", structure, 0, profile)
 
 
 def _candidate() -> GeneratedCommit:
@@ -356,3 +431,59 @@ def _candidate() -> GeneratedCommit:
         provider="test",
         raw_response={},
     )
+
+
+def _long_window_candidate() -> GeneratedCommit:
+    vulnerable = _long_window_code()
+    fixed = vulnerable.replace(
+        "    query = f\"SELECT id FROM users WHERE name = '{name}'\"",
+        "    query = \"SELECT id FROM users WHERE name = ?\"",
+    ).replace("    return cursor.execute(query)", "    return cursor.execute(query, (name,))")
+    return GeneratedCommit(
+        commit_message="Fix SQL injection",
+        filename="app.py",
+        vulnerable_code=vulnerable,
+        fixed_code=fixed,
+        diff="--- a/app.py\n+++ b/app.py\n",
+        badparts=["query = f\"SELECT id FROM users WHERE name = '{name}'", "return cursor.execute(query)"],
+        goodparts=["query = \"SELECT id FROM users WHERE name = ?\"", "return cursor.execute(query, (name,))"],
+        provider="test",
+        raw_response={},
+    )
+
+
+def _long_window_code() -> str:
+    lines = ["def clean_before(value):", "    result = value"]
+    for index in range(43):
+        lines.append(f"    result = result + {index}")
+    lines.extend(
+        [
+            "    return result",
+            "",
+            "def lookup(cursor, name):",
+            "    query = f\"SELECT id FROM users WHERE name = '{name}'\"",
+            "    return cursor.execute(query)",
+            "",
+            "def clean_after(items):",
+            "    total = 0",
+        ]
+    )
+    for index in range(43):
+        lines.append(f"    total = total + len(str(items[{index % 3}]))")
+    lines.append("    return total")
+    return "\n".join(lines) + "\n"
+
+
+def _clean_tool_runs() -> tuple[validator.ToolRun, validator.ToolRun, validator.ToolRun]:
+    clean_bandit = validator.ToolRun("bandit", True, "success", [], 0, [], None)
+    semgrep_before = validator.ToolRun(
+        "semgrep",
+        True,
+        "success",
+        [],
+        1,
+        [{"check_id": "synvul.cwe-89.sql-injection"}],
+        None,
+    )
+    semgrep_after = validator.ToolRun("semgrep", True, "success", [], 0, [], None)
+    return clean_bandit, semgrep_before, semgrep_after

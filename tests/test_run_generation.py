@@ -49,6 +49,8 @@ class RunGenerationTests(unittest.TestCase):
                 "1",
                 "--provider",
                 "mock",
+                "--generation-profile",
+                "window_balanced",
                 "--output",
                 str(output),
                 "--no-export",
@@ -70,6 +72,8 @@ class RunGenerationTests(unittest.TestCase):
         self.assertEqual(1, summary["coverage"]["sql"]["planned"])
         self.assertEqual(1, summary["coverage"]["sql"]["unfilled"])
         self.assertEqual(1, len(rejected))
+        self.assertEqual("window_balanced", rejected[0]["generation_profile"])
+        self.assertEqual("window_balanced", rejected[0]["context"]["generation_profile"])
 
     def test_workers_run_slots_concurrently_and_keep_accepted_ids_unique(self) -> None:
         barrier = threading.Barrier(4)
@@ -243,6 +247,42 @@ class RunGenerationTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         reviewer.assert_not_called()
         self.assertEqual({"required": False, "status": "skipped"}, accepted[0]["review"])
+
+    def test_generation_profile_is_recorded_on_accepted_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            argv = [
+                "run_generation.py",
+                "--per-cwe",
+                "1",
+                "--cwe",
+                "sql",
+                "--max-attempts",
+                "1",
+                "--provider",
+                "mock",
+                "--generation-profile",
+                "window_balanced",
+                "--output",
+                str(output),
+                "--no-review",
+                "--no-export",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch("synvulcommit.run_generation.generate_commit", return_value=_candidate_for_index(0)),
+                patch("synvulcommit.run_generation.validate_candidate", return_value=_PassingValidation()),
+            ):
+                exit_code = main()
+
+            accepted = _read_jsonl(output / "samples.jsonl")
+            summary = json.loads((output / "diversity_summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("window_balanced", accepted[0]["generation_profile"])
+        self.assertEqual("window_balanced", accepted[0]["context"]["generation_profile"])
+        self.assertNotEqual("single_function", accepted[0]["context"]["structure"])
+        self.assertEqual("window_balanced", summary["coverage"]["sql"]["generation_profile"])
 
     def test_existing_target_is_resumed_without_calling_the_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

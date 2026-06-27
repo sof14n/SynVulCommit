@@ -7,6 +7,7 @@ from itertools import product
 from typing import Any
 
 from .cwe_registry import CWEDefinition, all_cwes
+from .generation_profile import COMPACT_PROFILE, WINDOW_BALANCED_PROFILE, normalize_generation_profile
 
 
 APP_TYPES = ("Flask", "Django", "CLI", "API", "script")
@@ -45,6 +46,7 @@ class GenerationSpec:
     difficulty: str
     structure: str
     sample_index: int
+    generation_profile: str = COMPACT_PROFILE
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -56,6 +58,7 @@ class GenerationSpec:
 @dataclass
 class CweCoverage:
     definition: CWEDefinition
+    generation_profile: str
     compatible_tuples: tuple[tuple[str, str, str, str], ...]
     existing_counts: Counter[tuple[str, str, str, str]]
     planned_counts: Counter[tuple[str, str, str, str]]
@@ -89,10 +92,12 @@ class CweCoverage:
     def summary(self) -> dict[str, Any]:
         combined = self.existing_counts + self.accepted_counts
         distributions = {
-            "application_type": _marginal_counts(combined, 0, APP_TYPES_BY_CWE.get(self.definition.key, APP_TYPES)),
-            "flow_pattern": _marginal_counts(combined, 1, FLOW_PATTERNS),
-            "structure": _marginal_counts(combined, 2, STRUCTURES),
-            "difficulty": _marginal_counts(combined, 3, DIFFICULTIES),
+            "application_type": _marginal_counts(
+                combined, 0, _values_from_tuples(self.compatible_tuples, 0, APP_TYPES_BY_CWE.get(self.definition.key, APP_TYPES))
+            ),
+            "flow_pattern": _marginal_counts(combined, 1, _values_from_tuples(self.compatible_tuples, 1, FLOW_PATTERNS)),
+            "structure": _marginal_counts(combined, 2, _values_from_tuples(self.compatible_tuples, 2, STRUCTURES)),
+            "difficulty": _marginal_counts(combined, 3, _values_from_tuples(self.compatible_tuples, 3, DIFFICULTIES)),
         }
         uncovered_values = {
             dimension: [value for value, count in counts.items() if count == 0]
@@ -111,6 +116,7 @@ class CweCoverage:
         return {
             "cwe": self.definition.cwe,
             "mode": self.definition.mode,
+            "generation_profile": self.generation_profile,
             "target_accepted": self.target_accepted,
             "existing_accepted": self.existing_accepted,
             "planned": sum(self.planned_counts.values()),
@@ -156,9 +162,11 @@ def build_coverage_plan(
     seed: int | None,
     existing_records: list[dict[str, Any]],
     cwe_filters: list[str] | None = None,
+    generation_profile: str = COMPACT_PROFILE,
 ) -> CoveragePlan:
     if per_cwe < 0:
         raise ValueError("per_cwe must be non-negative")
+    profile = normalize_generation_profile(generation_profile)
     wanted = {value.lower().strip() for value in cwe_filters or []}
     definitions = [
         definition
@@ -172,12 +180,13 @@ def build_coverage_plan(
     specs: list[GenerationSpec] = []
     seed_value = 0 if seed is None else seed
     for definition in definitions:
-        compatible_tuples = _compatible_tuples(definition)
-        existing_counts = _existing_tuple_counts(existing_records, definition, compatible_tuples)
-        existing_accepted = _accepted_record_count(existing_records, definition)
+        compatible_tuples = _compatible_tuples(definition, profile)
+        existing_counts = _existing_tuple_counts(existing_records, definition, compatible_tuples, profile)
+        existing_accepted = _accepted_record_count(existing_records, definition, profile)
         planned_counts = Counter(existing_counts)
         coverage = CweCoverage(
             definition,
+            profile,
             compatible_tuples,
             existing_counts,
             Counter(),
@@ -195,7 +204,7 @@ def build_coverage_plan(
             )
             planned_counts[context_tuple] += 1
             coverage.planned_counts[context_tuple] += 1
-            specs.append(_spec_from_tuple(definition, start_index + offset, context_tuple))
+            specs.append(_spec_from_tuple(definition, start_index + offset, context_tuple, profile))
         coverage_by_mode[definition.mode] = coverage
 
     specs.sort(key=lambda spec: _stable_tiebreak(seed_value, spec.cwe_key, spec.sample_index, spec.context_tuple()))
@@ -206,21 +215,32 @@ def iter_specs(
     per_cwe: int,
     seed: int | None = None,
     existing_records: list[dict[str, Any]] | None = None,
+    generation_profile: str = COMPACT_PROFILE,
 ) -> list[GenerationSpec]:
-    return build_coverage_plan(per_cwe, seed, existing_records or []).specs
+    return build_coverage_plan(per_cwe, seed, existing_records or [], generation_profile=generation_profile).specs
 
 
-def make_spec(definition: CWEDefinition, sample_index: int, rng: Any = None) -> GenerationSpec:
+def make_spec(
+    definition: CWEDefinition,
+    sample_index: int,
+    rng: Any = None,
+    generation_profile: str = COMPACT_PROFILE,
+) -> GenerationSpec:
     del rng
-    tuples = _compatible_tuples(definition)
-    return _spec_from_tuple(definition, sample_index, tuples[sample_index % len(tuples)])
+    profile = normalize_generation_profile(generation_profile)
+    tuples = _compatible_tuples(definition, profile)
+    return _spec_from_tuple(definition, sample_index, tuples[sample_index % len(tuples)], profile)
 
 
-def _compatible_tuples(definition: CWEDefinition) -> tuple[tuple[str, str, str, str], ...]:
+def _compatible_tuples(
+    definition: CWEDefinition,
+    generation_profile: str = COMPACT_PROFILE,
+) -> tuple[tuple[str, str, str, str], ...]:
+    structures = _structures_for_profile(generation_profile)
     return tuple(
         (application_type, flow_pattern, structure, difficulty)
         for application_type, structure, difficulty in product(
-            APP_TYPES_BY_CWE.get(definition.key, APP_TYPES), STRUCTURES, DIFFICULTIES
+            APP_TYPES_BY_CWE.get(definition.key, APP_TYPES), structures, DIFFICULTIES
         )
         for flow_pattern in FLOW_PATTERNS_BY_STRUCTURE[structure]
     )
@@ -230,6 +250,7 @@ def _existing_tuple_counts(
     records: list[dict[str, Any]],
     definition: CWEDefinition,
     compatible_tuples: tuple[tuple[str, str, str, str], ...],
+    generation_profile: str,
 ) -> Counter[tuple[str, str, str, str]]:
     valid = set(compatible_tuples)
     counts: Counter[tuple[str, str, str, str]] = Counter()
@@ -238,6 +259,8 @@ def _existing_tuple_counts(
         if not isinstance(context, dict):
             continue
         if not _record_matches_definition(record, definition):
+            continue
+        if _record_generation_profile(record) != generation_profile:
             continue
         context_tuple = (
             str(context.get("application_type", "")),
@@ -250,8 +273,13 @@ def _existing_tuple_counts(
     return counts
 
 
-def _accepted_record_count(records: list[dict[str, Any]], definition: CWEDefinition) -> int:
-    return sum(1 for record in records if _record_matches_definition(record, definition))
+def _accepted_record_count(records: list[dict[str, Any]], definition: CWEDefinition, generation_profile: str) -> int:
+    return sum(
+        1
+        for record in records
+        if _record_matches_definition(record, definition)
+        and _record_generation_profile(record) == generation_profile
+    )
 
 
 def _record_matches_definition(record: dict[str, Any], definition: CWEDefinition) -> bool:
@@ -262,6 +290,17 @@ def _record_matches_definition(record: dict[str, Any], definition: CWEDefinition
     record_cwe = str(record.get("cwe") or context.get("cwe", "")).lower()
     record_key = str(context.get("cwe_key", "")).lower()
     return record_mode == definition.mode or record_cwe == definition.cwe.lower() or record_key == definition.key
+
+
+def _record_generation_profile(record: dict[str, Any]) -> str:
+    context = record.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    value = record.get("generation_profile") or context.get("generation_profile")
+    try:
+        return normalize_generation_profile(str(value) if value is not None else COMPACT_PROFILE)
+    except ValueError:
+        return COMPACT_PROFILE
 
 
 def _next_sample_index(records: list[dict[str, Any]], definition: CWEDefinition) -> int:
@@ -327,6 +366,7 @@ def _spec_from_tuple(
     definition: CWEDefinition,
     sample_index: int,
     context_tuple: tuple[str, str, str, str],
+    generation_profile: str = COMPACT_PROFILE,
 ) -> GenerationSpec:
     application_type, flow_pattern, structure, difficulty = context_tuple
     return GenerationSpec(
@@ -339,7 +379,24 @@ def _spec_from_tuple(
         difficulty=difficulty,
         structure=structure,
         sample_index=sample_index,
+        generation_profile=normalize_generation_profile(generation_profile),
     )
+
+
+def _structures_for_profile(generation_profile: str) -> tuple[str, ...]:
+    profile = normalize_generation_profile(generation_profile)
+    if profile == WINDOW_BALANCED_PROFILE:
+        return ("class_based", "multi_function")
+    return STRUCTURES
+
+
+def _values_from_tuples(
+    compatible_tuples: tuple[tuple[str, str, str, str], ...],
+    index: int,
+    fallback: tuple[str, ...],
+) -> tuple[str, ...]:
+    values = tuple(value for value in fallback if any(item[index] == value for item in compatible_tuples))
+    return values or fallback
 
 
 def _stable_tiebreak(seed: int, cwe_key: str, slot: int, context_tuple: tuple[str, str, str, str]) -> str:

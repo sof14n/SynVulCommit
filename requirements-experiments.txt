@@ -4,3 +4,5 @@ gensim
 scikit-learn
 tensorflow
 joblib
+torch
+transformers

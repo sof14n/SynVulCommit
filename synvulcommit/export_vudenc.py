@@ -132,6 +132,11 @@ def _build_metadata_row(
         "repo": repo_name,
         "commit_id": commit_id,
         "filename": filename,
+        "generation_profile": _safe_text(
+            record.get("generation_profile")
+            or (record.get("context") if isinstance(record.get("context"), dict) else {}).get("generation_profile")
+        )
+        or "compact",
         "context": _allowlisted_context(record.get("context")),
         "provenance": _allowlisted_provenance(record),
         "validation_summary": _validation_summary(record.get("validation")),
@@ -166,7 +171,7 @@ def _validation_summary(value: Any) -> dict[str, Any]:
     validation = value if isinstance(value, dict) else {}
     structural = validation.get("structural")
     structural = structural if isinstance(structural, dict) else {}
-    return {
+    summary = {
         "passed": bool(validation.get("passed")),
         "reason_count": _list_length(validation.get("reasons")),
         "warning_count": _list_length(validation.get("warnings")),
@@ -178,6 +183,33 @@ def _validation_summary(value: Any) -> dict[str, Any]:
         "bandit": _tool_summary(validation, "bandit"),
         "semgrep": _tool_summary(validation, "semgrep"),
     }
+    window_balance = _window_balance_summary(validation.get("window_balance"))
+    if window_balance:
+        summary["window_balance"] = window_balance
+    return summary
+
+
+def _window_balance_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed: dict[str, Any] = {}
+    for field in (
+        "window_size",
+        "stride",
+        "vulnerable_token_count",
+        "fixed_token_count",
+        "positive_window_count",
+        "negative_window_count",
+        "badpart_token_count",
+    ):
+        safe_value = _safe_integer(value.get(field))
+        if safe_value is not None:
+            allowed[field] = safe_value
+    for field in ("badpart_token_ratio", "fixed_token_retention"):
+        safe_value = _safe_float(value.get(field))
+        if safe_value is not None:
+            allowed[field] = safe_value
+    return allowed
 
 
 def _review_summary(value: Any) -> dict[str, Any]:
@@ -250,6 +282,26 @@ def _safe_scalar(value: Any) -> str | int | float | bool | None:
     if isinstance(value, (bool, int, float)):
         return value
     return _safe_text(value)
+
+
+def _safe_integer(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        integer = int(value)
+    except (TypeError, ValueError):
+        return None
+    return integer if integer >= 0 else None
+
+
+def _safe_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, 6) if number >= 0 else None
 
 
 def _safe_text(value: Any) -> str | None:

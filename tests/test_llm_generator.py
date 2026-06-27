@@ -10,6 +10,7 @@ from synvulcommit.llm_generator import (
     GenerationError,
     LocalHTTPProvider,
     OpenAICompatibleProvider,
+    _max_completion_tokens,
     _post_json,
     normalize_candidate,
     validate_provider_configuration,
@@ -113,6 +114,14 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0.2)
         self.assertEqual(payload["max_tokens"], 1800)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+
+    def test_generation_max_tokens_allows_provider_large_output_limit(self) -> None:
+        with patch.dict(os.environ, {"SYNVUL_MAX_TOKENS": "384000"}, clear=True):
+            self.assertEqual(384000, _max_completion_tokens())
+
+        with patch.dict(os.environ, {"SYNVUL_MAX_TOKENS": "384001"}, clear=True):
+            with self.assertRaisesRegex(GenerationError, "between 256 and 384000"):
+                _max_completion_tokens()
 
     def test_openai_compatible_provider_can_disable_thinking_mode(self) -> None:
         response = {"choices": [{"message": {"content": json.dumps(_review_payload())}}]}

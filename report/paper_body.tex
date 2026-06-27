@@ -1,7 +1,3 @@
-\begin{abstract}
-Machine-learning vulnerability detection depends on labeled code corpora, but real vulnerability-fixing commits are expensive to mine and difficult to balance across weakness categories. This paper presents SynVulCommit, a provider-agnostic pipeline for generating Python vulnerability-fix commit pairs across seven VUDENC-compatible Common Weakness Enumeration (CWE) categories. The pipeline combines deterministic quota planning, CWE-specific structural checks, Bandit and Semgrep analysis, a second-stage large language model (LLM) reviewer, and exact, abstract-syntax-tree, and token-based duplicate rejection. It produced 678 accepted pairs. A frozen 637-pair subset, balanced at 91 pairs per CWE, was compared with real VUDENC data using LSTM, multilayer perceptron (MLP), Random Forest, and convolutional neural network (CNN) models with shared Word2Vec features. All conditions were evaluated on the same held-out real VUDENC commits. Real-only training achieved the strongest mean macro-F1, led by Random Forest at 0.6618. Synthetic-only training was substantially weaker, primarily because compact generated files created a strongly positive-skewed window representation. Combining real and synthetic data improved the LSTM slightly but did not improve the other three models. The result supports using validated synthetic commits for controlled data-generation research, while showing that generation quality alone does not remove representation and distribution-shift risks.
-\end{abstract}
-
 \section{Introduction}
 Software vulnerabilities remain a high-impact source of security failures, and source-code learning methods are increasingly used to prioritize or classify vulnerable code. Their effectiveness depends on the quality, coverage, and labeling discipline of training data. Real repositories provide valuable examples, but vulnerability-fixing commits are sparse, noisy, and unevenly distributed across weakness types. VUDENC addresses this problem for Python by deriving vulnerable and fixed code from natural vulnerability-fixing commits \cite{vudenc}. However, a mined corpus cannot guarantee uniform coverage of a chosen CWE, framework, program structure, or data-flow pattern.
 
@@ -12,13 +8,13 @@ The contributions are:
   \item A generation pipeline for seven Python CWE categories with deterministic quota-based coverage over application type, flow pattern, difficulty, and program structure.
   \item A layered acceptance policy combining CWE-specific structural checks, Bandit, Semgrep, a blinded LLM reviewer, and near-duplicate rejection.
   \item A clean VUDENC-style training export and a separate sanitized audit sidecar.
-  \item A controlled A/B/C evaluation using four Word2Vec-based model families and a fixed held-out real VUDENC test split.
+  \item A controlled A/B/C evaluation using eight model variants from the earlier lab work, including Word2Vec, CodeBERT, and GraphCodeBERT representations.
 \end{enumerate}
 
 \section{Background and Related Work}
 Deep learning for vulnerability detection has progressed from code-gadget and representation-learning approaches, such as VulDeePecker \cite{vuldeepecker} and early deep representation learning \cite{russell2018}, to systematic vulnerability representations \cite{sysevr} and graph-based program semantics \cite{devign}. Dataset construction remains central: Big-Vul demonstrates the value of commit-level vulnerability data with code changes and CVE summaries \cite{bigvul}, while VUDENC specifically provides a Python corpus based on natural vulnerable/fixed commits \cite{vudenc}. Reviews of the area caution that reported performance can depend strongly on dataset construction and evaluation setup \cite{chakraborty2022}.
 
-Pre-trained code models offer richer representations. CodeBERT jointly pre-trains on programming and natural-language data \cite{codebert}; GraphCodeBERT adds data-flow structure \cite{graphcodebert}; and VulBERTa targets vulnerability detection through simplified source-code pre-training \cite{vulberta}. In Lab 3, Word2Vec CNN models were more stable than the CodeBERT and GraphCodeBERT experiments, especially for SQL injection. Therefore, this paper uses the four established Word2Vec model families as the primary comparison and treats transformer results as prior context rather than mixing different training protocols.
+Pre-trained code models offer richer representations. CodeBERT jointly pre-trains on programming and natural-language data \cite{codebert}; GraphCodeBERT adds data-flow structure \cite{graphcodebert}; and VulBERTa targets vulnerability detection through simplified source-code pre-training \cite{vulberta}. Lab 3 evaluated Word2Vec, CodeBERT, and GraphCodeBERT model variants and found that transformer embeddings were not consistently more stable than Word2Vec baselines. For this project we therefore include both families rather than treating transformer results as out-of-scope.
 
 LLMs can both assist development and introduce risks. Pearce et al. found insecure code patterns in generated Copilot suggestions \cite{pearce2022}. Conversely, LLM-based augmentation has been studied for long-tail vulnerability detection \cite{deng2024}. These findings motivate a conservative design: LLMs propose candidates, but deterministic analysis and independent review decide whether candidates enter the corpus.
 
@@ -33,113 +29,134 @@ Figure~\ref{fig:pipeline} summarizes the acceptance path. Structural checks veri
 
 \begin{figure*}[t]
 \centering
-\fbox{\parbox{0.92\textwidth}{
-\centering
-\textbf{Quota-planned specification} $\rightarrow$ \textbf{LLM commit pair} $\rightarrow$ \textbf{structural checks} $\rightarrow$ \textbf{Bandit and Semgrep} $\rightarrow$ \textbf{blinded LLM review} $\rightarrow$ \textbf{duplicate policy} $\rightarrow$ \textbf{accepted JSONL and VUDENC export}
-
-\vspace{0.6em}
-Rejected candidates retry the same quota slot. Accepted records preserve detailed internal audit data; the training export contains only code, diffs, and changed fragments.
-}}
-\caption{SynVulCommit generation and acceptance pipeline.}
+\includegraphics[width=0.95\textwidth]{pipeline_diagram.pdf}
+\Description{A left-to-right pipeline from quota planner to LLM commit pair, static validation, LLM reviewer, diversity index, VUDENC export, and A/B/C evaluation.}
+\caption{SynVulCommit generation, validation, export, and evaluation pipeline. Rejected candidates retry the same planned context; only verified records enter the training export.}
 \label{fig:pipeline}
 \end{figure*}
 
 After deterministic validation, a second-stage reviewer receives the requested CWE/context and the vulnerable/fixed code, but not analyzer output or provider metadata. It returns a strict structured verdict. A candidate is accepted only when the review status is complete and the verdict is \texttt{pass}. This is a quality gate, not a replacement for static analysis.
 
 \subsection{Diversity, Export, and Verification}
-The diversity index rejects candidates in policy order: exact normalized vulnerable/fixed pair hashes, normalized AST-pair fingerprints, and same-CWE token-shingle similarity at Jaccard similarity at least 0.90. AST normalization removes identifiers, names, aliases, attributes, keywords, and literal-specific variation, preventing superficial renaming from creating a new sample.
+The diversity index rejects candidates in policy order: exact normalized vulnerable/fixed pair hashes, normalized AST-pair fingerprints, and same-CWE token-shingle similarity at Jaccard similarity at least 0.90. AST normalization removes identifiers, names, aliases, attributes, and literal-specific variation, preventing superficial renaming from creating a new sample.
 
-Accepted records are exported to \texttt{plain\_<mode>} VUDENC-style files. These files retain only the commit message, vulnerable/fixed sources, diff, filename, add/remove counts, \texttt{badparts}, and \texttt{goodparts}. The separate \texttt{metadata.jsonl} sidecar contains sanitized provenance and validation summaries. A strict dataset verifier checks the accepted records, rejected categories, duplicate policy, reviewer state, and exact linkage between JSONL records and exported commits.
+Accepted records are exported to \texttt{plain\_<mode>} VUDENC-style files. These files retain only the commit message, vulnerable and fixed sources, diff, filename, changed-line counts, \texttt{badparts}, and \texttt{goodparts}. The separate \texttt{metadata.jsonl} sidecar contains sanitized provenance and validation summaries. A strict dataset verifier checks the accepted records, rejected categories, duplicate policy, reviewer state, and exact linkage between JSONL records and exported commits.
+
+\subsection{Window-Balanced Generation Profile}
+The first compact generation profile produced valid commit pairs, but many files were shorter than one 200-token model window. This caused most synthetic windows to overlap the vulnerable region. To align generation with the downstream VUDENC-style window task, the final corpus uses a \texttt{window\_balanced} profile. It requires realistic 420--900 token Python modules, clean context before and after the vulnerable region, localized vulnerable fragments, at least one vulnerable and one clean 200-token window, and fixed code that preserves most of the original file length. These checks are applied only to the window-balanced profile so the original compact generator remains available for diagnostics.
 
 \section{Experimental Design}
 \subsection{Datasets and Splits}
-The accepted generation output contained 678 pairs. Figure~\ref{fig:coverage} shows the per-CWE counts. To avoid selecting a stronger CWE merely because it had more generated candidates, the experiment froze 91 synthetic pairs per CWE, for 637 pairs total. The selection was deterministic and stratified by the four generation context dimensions.
+The final verified generation output contains 1,205 accepted window-balanced pairs. Figure~\ref{fig:coverage} shows the per-CWE counts. SQL injection is the limiting class with 149 accepted pairs, so the experiment freezes exactly 149 synthetic commits per CWE, for 1,043 synthetic commits total. The selection is deterministic and stratified by application type, flow pattern, difficulty, and structure.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{corpus_coverage.pdf}
-\caption{Accepted pairs in the source corpus. The dashed line marks the 91-pair-per-CWE frozen subset used for evaluation.}
+\Description{Bar chart showing accepted pairs per CWE. SQL has 149 accepted pairs and XSRF has 200, with other CWEs between those values.}
+\caption{Verified accepted pairs in the final window-balanced corpus. The dashed line marks the 149-pair-per-CWE frozen subset used for evaluation.}
 \label{fig:coverage}
 \end{figure}
 
-Real VUDENC data was normalized into the same commit-level representation; legacy \texttt{path\_disclosure} was mapped to \texttt{directory\_traversal}. The real cap was $\min(91, \text{available commits})$ per CWE. Remote code execution had 54 available real commits and XSS had 69; the remaining CWEs had 91 selected commits. Commits, not windows, were deterministically split approximately 70/15/15 into train/validation/test. Consequently, every window from a multi-file commit stays in one split.
+Real VUDENC data is normalized into the same commit-level representation; the legacy path-disclosure mode is mapped to directory traversal. The real-data cap is $\min(149, \text{available commits})$ per CWE. The selected real commit counts are 149 SQL, 106 command injection, 140 directory traversal, 93 open redirect, 54 remote code execution, 69 XSS, and 141 XSRF. Commits, not windows, are deterministically split approximately 70/15/15 into train, validation, and test. Consequently, every window from a commit stays in one split.
 
-Windows contain up to 200 lexical code tokens. A vulnerable-source window overlapping a \texttt{badpart} is labeled vulnerable; other source windows are labeled clean. For computational tractability, each file retains at most four positive and four negative windows. This preserves the original source-window semantics but creates an important limitation for compact generated files, discussed in Section~\ref{sec:discussion}.
+Windows contain up to 200 lexical code tokens. A vulnerable-source window overlapping a \texttt{badpart} is labeled vulnerable; other source windows are labeled clean. For computational tractability, each file retains at most four positive and four negative windows. Figure~\ref{fig:labels} shows that the final synthetic split is no longer positive-skewed: synthetic training contains 2,908 vulnerable and 2,898 clean windows, while synthetic validation contains 612 vulnerable and 616 clean windows.
 
-\subsection{A/B/C Conditions and Models}
-Condition A trains and validates on real VUDENC data. Condition B trains and validates on the synthetic subset. Condition C trains on their union and validates on real VUDENC. Every condition is evaluated on the identical held-out real VUDENC test set. The real train/validation/test window counts were 5,286/1,083/1,143; synthetic counts were 513/104/114, although synthetic test windows were not used.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{training_label_distribution.pdf}
+\Description{Stacked bar chart showing clean and vulnerable windows for real and synthetic train, validation, and test splits. Synthetic train and validation are nearly balanced.}
+\caption{Selected source-window label distribution after commit-level splitting. The window-balanced generation profile produces clean and vulnerable synthetic windows in nearly equal proportions.}
+\label{fig:labels}
+\end{figure}
 
-All models use a shared independently trained 300-dimensional Python Word2Vec representation. The saved legacy Word2Vec metadata file lacked its vector sidecar, so the model was rebuilt from the existing external Python corpus and stored inside the experiment release. The evaluated models were:
+\subsection{A/B/C Conditions}
+Condition A trains and validates on real VUDENC data. Condition B trains and validates on the synthetic subset. Condition C trains on the union of real and synthetic training windows and validates on real VUDENC. Every condition is evaluated on the identical held-out real VUDENC test split. Synthetic test windows are prepared for audit symmetry but are not used for the main reported evaluation.
+
+\subsection{Model Families}
+The experiment reuses the model families from Lab 3. The Word2Vec models use a 300-dimensional Python Word2Vec representation rebuilt from the existing external Python corpus when the saved legacy vector sidecar was unavailable. LSTM and CNN consume 200-token sequences with fixed Word2Vec embeddings. MLP and Random Forest use mean-pooled Word2Vec vectors. The Word2Vec models are:
 \begin{itemize}
   \item LSTM: 100 units and 0.2 dropout;
   \item MLP: 256 and 128 ReLU hidden units with Adam;
   \item Random Forest: 300 trees and balanced class weights;
   \item CNN: 128 one-dimensional filters, kernel size 5, global max pooling, dense 128, and 0.2 dropout.
 \end{itemize}
-Sequence models use 200 token IDs with fixed Word2Vec embeddings. MLP and Random Forest use mean-pooled 300-dimensional vectors. Neural models use Adam, batch size 128, up to 100 epochs, and early stopping based on validation F1. Python, NumPy, scikit-learn, and TensorFlow seeds are fixed.
+
+The transformer variants mirror the Lab 3 setup by using CodeBERT and GraphCodeBERT as frozen embedding extractors. For each 200-token window, the transformer hidden states are cached and used by either the same LSTM head or the same CNN head. The evaluated variants combine LSTM and CNN heads with CodeBERT and GraphCodeBERT embeddings. Neural models use Adam, batch size 128, up to 100 epochs, and early stopping based on validation F1. Python, NumPy, scikit-learn, and TensorFlow seeds are fixed.
 
 \section{Results}
-Figure~\ref{fig:abc} reports the mean macro-F1 across the seven CWEs. Macro-F1 is emphasized because a high vulnerable-class recall can hide a model that predicts most windows as vulnerable.
+Figure~\ref{fig:abc} reports the mean macro-F1 across the seven CWEs for all eight model variants. Macro-F1 is emphasized because a high vulnerable-class recall can hide a model that predicts most windows as vulnerable.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=\linewidth]{abc_macro_f1.pdf}
-\caption{Mean macro-F1 across the seven CWEs on the same held-out real VUDENC test split.}
+\includegraphics[width=0.92\textwidth]{abc_macro_f1.pdf}
+\Description{Horizontal grouped bar chart comparing mean macro-F1 for eight model variants under real-only, synthetic-only, and mixed training conditions.}
+\caption{Mean macro-F1 across the seven CWEs for all Word2Vec and transformer model variants. All rows use the same held-out real VUDENC test split.}
 \label{fig:abc}
-\end{figure}
-
-\begin{table}[t]
-\centering
-\caption{Mean macro-F1 by model and data condition.}
-\label{tab:main-results}
-\begin{tabular}{lccc}
-\toprule
-Model & A: Real & B: Synthetic & C: Combined \\
-\midrule
-LSTM & 0.5407 & 0.4289 & 0.5605 \\
-MLP & 0.6463 & 0.3577 & 0.6421 \\
-Random Forest & \textbf{0.6618} & 0.3419 & 0.6415 \\
-CNN & 0.6124 & 0.3662 & 0.6080 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Real-only training was strongest for every model family overall. Random Forest achieved the best mean macro-F1 (0.6618), followed by MLP (0.6463), CNN (0.6124), and LSTM (0.5407). Synthetic-only training was substantially weaker for all models. The combined condition slightly improved LSTM from 0.5407 to 0.5605, but did not improve CNN, MLP, or Random Forest.
-
-Table~\ref{tab:per-cwe} lists the strongest macro-F1 configuration for each CWE. The table should be interpreted with the common real test set in mind: it identifies useful per-CWE patterns, but the small fixed test subsets limit fine-grained conclusions.
+\end{figure*}
 
 \begin{table*}[t]
 \centering
-\caption{Best macro-F1 configuration per CWE on held-out real VUDENC windows.}
-\label{tab:per-cwe}
-\begin{tabular}{lccccccc}
+\caption{Mean macro-F1 across seven CWEs by model and data condition.}
+\label{tab:main-results}
+\begin{tabular}{lccc}
 \toprule
-CWE mode & Command & Path & Redirect & RCE & SQL & XSRF & XSS \\
+Model & A: Real & B: Synthetic & C: Mixed \\
 \midrule
-Best model & MLP & MLP & Random Forest & LSTM & Random Forest & Random Forest & Random Forest \\
-Condition & C & A & A & C & A & C & A \\
-Macro-F1 & 0.6897 & 0.6096 & 0.7308 & 0.6652 & 0.6544 & 0.7040 & 0.6950 \\
+LSTM Word2Vec & 0.5709 & 0.4408 & 0.6175 \\
+MLP Word2Vec & 0.6848 & 0.4333 & \textbf{0.7161} \\
+Random Forest Word2Vec & 0.6984 & 0.4585 & 0.6637 \\
+CNN Word2Vec & 0.6477 & 0.3961 & 0.6073 \\
+LSTM CodeBERT & 0.4663 & 0.4881 & 0.4666 \\
+CNN CodeBERT & 0.5992 & 0.4415 & 0.5591 \\
+LSTM GraphCodeBERT & 0.5098 & 0.4919 & 0.5524 \\
+CNN GraphCodeBERT & 0.6140 & 0.4201 & 0.6232 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The strongest overall result is MLP with mixed real-plus-synthetic training, with a mean macro-F1 of 0.7161. Random Forest trained on real data alone is second at 0.6984. Mixed training improves MLP and LSTM over their real-only Word2Vec baselines, but it does not improve Random Forest or CNN. Synthetic-only training remains the weakest condition for every model family except LSTM+CodeBERT, where all three conditions are weak and close together.
+
+The transformer variants do not outperform the best Word2Vec models. The best transformer result is CNN+GraphCodeBERT with mixed training at 0.6232 macro-F1. This is competitive with the Word2Vec LSTM and CNN results, but below MLP and Random Forest. In this setup, frozen transformer embeddings appear to help less than a simpler pooled Word2Vec MLP trained with mixed data.
+
+Table~\ref{tab:best-per-cwe} and Figure~\ref{fig:best-per-cwe} list the strongest configuration for each CWE. Mixed training gives the best result for command injection, remote code execution, and XSS. Real-only training remains best for directory traversal, open redirect, SQL injection, and XSRF.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{best_per_cwe.pdf}
+\Description{Bar chart showing the best macro-F1 score for each CWE. Command injection has the highest score and XSS the lowest.}
+\caption{Best macro-F1 configuration per CWE on the held-out real VUDENC test split.}
+\label{fig:best-per-cwe}
+\end{figure}
+
+\begin{table*}[t]
+\centering
+\caption{Best configuration per CWE on held-out real VUDENC windows.}
+\label{tab:best-per-cwe}
+\begin{tabular}{lcccccc}
+\toprule
+CWE mode & Best model & Condition & Accuracy & Precision & Recall & Macro-F1 \\
+\midrule
+Command injection & MLP Word2Vec & C & 0.8046 & 0.7941 & 0.8617 & 0.8014 \\
+Directory traversal & CNN Word2Vec & A & 0.7366 & 0.7194 & 0.8333 & 0.7300 \\
+Open redirect & MLP Word2Vec & A & 0.7418 & 0.7582 & 0.7340 & 0.7417 \\
+Remote code execution & MLP Word2Vec & C & 0.7122 & 0.7246 & 0.7042 & 0.7122 \\
+SQL injection & MLP Word2Vec & A & 0.7297 & 0.7286 & 0.8226 & 0.7197 \\
+XSRF & Random Forest Word2Vec & A & 0.7602 & 0.7731 & 0.8107 & 0.7547 \\
+XSS & MLP Word2Vec & C & 0.6456 & 0.6364 & 0.7000 & 0.6441 \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 \section{Discussion and Limitations}\label{sec:discussion}
-The result answers the research question conservatively. The pipeline can produce a validated, diverse, balanced-at-commit-level synthetic corpus, but the corpus did not replace real VUDENC data for this window-based classification task. The result is not evidence that synthetic data is intrinsically useless. It is evidence that source representation and distribution matching are decisive.
+The result answers the research question conservatively. SynVulCommit can produce a validated, diverse, window-balanced synthetic corpus, and that corpus can improve some real-data models when used as augmentation. However, synthetic-only training still transfers poorly to held-out real VUDENC windows. The main remaining limitation is therefore not label imbalance; the window-balanced generation profile addressed that. The remaining limitation is distribution shift.
 
-Figure~\ref{fig:labels} exposes the main representation limitation. The real training split contains both clean and vulnerable windows. The synthetic training split contains 496 vulnerable windows and only 17 clean windows. Many generated files are shorter than 200 tokens, so their only source window overlaps the changed vulnerable region. The synthetic-only models therefore learned a positive-skewed decision rule, causing false positives on real clean windows. This explains why some synthetic-only runs show high vulnerable recall but poor macro-F1.
+Real VUDENC commits come from actual projects, with inconsistent developer style, project-specific helper functions, framework conventions, partial files, and surrounding maintenance logic. Synthetic examples are cleaner and more regular, even when quota planning and duplicate rejection increase diversity. In addition, the acceptance policy deliberately favors samples that deterministic rules and the reviewer can verify. This improves label reliability, but it narrows the accepted distribution toward obvious and analyzable cases. A model trained only on synthetic data may therefore learn generated-code regularities rather than robust real-project vulnerability signals.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{training_label_distribution.pdf}
-\caption{Training-window label distribution. Compact synthetic files produced a severe positive-label skew under source-only VUDENC-style window extraction.}
-\label{fig:labels}
-\end{figure}
+The transformer results reinforce this interpretation. CodeBERT and GraphCodeBERT embeddings do not automatically overcome the synthetic-to-real gap. Because the transformer encoders are used as frozen feature extractors rather than fine-tuned end-to-end, they provide richer token representations but still depend on the training distribution presented to the classifier head. The best overall result is a simpler MLP with mixed real and synthetic data, suggesting that data-condition design matters more here than representation complexity alone.
 
-Other threats to validity remain. Static analysis and review improve confidence but do not prove exploitability or production realism. The reviewer is an LLM and can share blind spots with the generator, even when configured independently. The corpus is Python-only and covers seven CWEs, so the results should not be generalized to all languages or weakness types. Finally, the frozen real test split is small for RCE and XSS because VUDENC has fewer commits in these modes.
-
-The next experiment should not merely generate more compact pairs. It should either generate longer modules with explicitly verified clean context or define a paired vulnerable/fixed window task and apply that definition symmetrically to both real and synthetic commits. The second option is more practical, but it changes the task from the original source-only VUDENC window protocol and must be reported explicitly.
+Several threats to validity remain. Static analysis and review improve confidence but do not prove exploitability or production realism. The reviewer is an LLM and can share blind spots with the generator, even when configured independently. The corpus is Python-only and covers seven CWEs, so the results should not be generalized to all languages or weakness types. The real VUDENC test split is small for remote code execution and XSS because VUDENC has fewer commits in these modes. Finally, this study uses one fixed seed for the final experiment; repeated multi-seed training would be needed to estimate variance.
 
 \section{Conclusion}
-SynVulCommit operationalizes controlled synthetic vulnerability-commit generation with quota-based context coverage, layered validation, reviewer gating, near-duplicate control, sanitized export, and strict dataset verification. It produced 678 accepted Python vulnerability-fix pairs and a frozen 637-pair balanced subset for controlled A/B/C evaluation.
+SynVulCommit operationalizes controlled synthetic vulnerability-commit generation with quota-based context coverage, layered validation, reviewer gating, near-duplicate control, sanitized export, strict dataset verification, and window-balance checks aligned with the downstream VUDENC representation. The final verified corpus contains 1,205 accepted Python vulnerability-fix pairs, from which a balanced 1,043-pair subset was used for A/B/C model evaluation.
 
-The experiments show a clear result: models trained on real VUDENC data generalize better to held-out real VUDENC windows than models trained only on the present synthetic subset. Adding synthetic data produced a small LSTM improvement but did not improve the other evaluated models. The key limitation was not only generation correctness; it was the mismatch between compact synthetic commits and the 200-token source-window labeling scheme. This finding is useful because it identifies a concrete requirement for future synthetic-data work: generation, validation, and downstream representation must be designed together.
+The experiments show that synthetic data alone is not a replacement for real VUDENC data in this task. However, synthetic data is useful as augmentation for some models: the best overall result is MLP with mixed real-plus-synthetic training, achieving a mean macro-F1 of 0.7161. The transformer variants from Lab 3 were also evaluated, but the best transformer model, CNN+GraphCodeBERT with mixed training, reached 0.6232 and did not outperform the strongest Word2Vec models. The practical conclusion is that validated synthetic commits can support controlled data-generation research and improve selected model families, but generation realism and downstream representation must be treated as part of the same system.
