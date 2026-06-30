@@ -16,17 +16,11 @@ The comparison uses three training conditions:
 
 The fixed real test split is reused for A, B, and C. This makes the comparison about training data, not test-set differences.
 
-## Frozen Synthetic Subset
+## Synthetic Subset Selection
 
-The generated corpus used for the final experiment contained enough accepted records to freeze a balanced release of:
+The experiment preparation command selects a balanced synthetic subset from an accepted SynVulCommit `samples.jsonl` file. Choose `--per-cwe` according to the minimum accepted count available across the CWE modes being compared.
 
-```text
-91 synthetic commit pairs per CWE
-7 CWEs
-637 total synthetic commit pairs
-```
-
-The selected subset is stratified by:
+For example, `--per-cwe 100` selects up to 100 accepted synthetic commit groups per CWE. The selected subset is stratified by:
 
 - application type,
 - flow pattern,
@@ -34,6 +28,8 @@ The selected subset is stratified by:
 - program structure.
 
 The selection uses a fixed seed so the subset is reproducible.
+
+For the submitted Lab 5 run, the balanced subset was selected from a larger verified window-balanced generated corpus. The exact selected counts, split manifests, metrics, and trained outputs are distributed as GitHub Release artifacts rather than tracked in the source repository.
 
 ## Real VUDENC Normalization
 
@@ -44,7 +40,7 @@ Legacy VUDENC mode names are mapped to the seven SynVulCommit modes. In particul
 Per CWE, the real-data cap is:
 
 ```text
-min(91, available real commits)
+min(<synthetic per-CWE cap>, available real commits)
 ```
 
 This keeps Model A and Model B as close as possible in commit count.
@@ -85,7 +81,7 @@ To keep the CPU experiment tractable, preparation keeps a deterministic maximum 
 
 ## Models
 
-The final controlled comparison runs four model families:
+The controlled comparison supports the four Word2Vec model families from the earlier lab:
 
 - LSTM: 100 units, dropout 0.2.
 - MLP: dense hidden layers 256 and 128 with ReLU and Adam.
@@ -101,7 +97,7 @@ Neural models use:
 
 Python, NumPy, scikit-learn, and TensorFlow seeds are fixed for reproducibility.
 
-CodeBERT and GraphCodeBERT were excluded from the primary Lab 5 comparison because the earlier Lab 3 transformer experiments were unstable. The controlled Lab 5 comparison therefore focuses on the four established Word2Vec model families.
+The implementation also supports frozen CodeBERT and GraphCodeBERT embedding variants for LSTM and CNN. These transformer-embedding runs are optional because they are slower and create large feature caches.
 
 ## Commands
 
@@ -109,10 +105,10 @@ Prepare an experiment release:
 
 ```powershell
 .\.venv\Scripts\python -m synvulcommit.prepare_experiment `
-  --synthetic output_deepseekpro_glmreview_100_per_cwe\samples.jsonl `
+  --synthetic output_<run_name>\samples.jsonl `
   --vudenc-root ..\data `
-  --out experiments\release_91_v1 `
-  --per-cwe 91 `
+  --out experiments\<release_name> `
+  --per-cwe <N> `
   --seed 20260624
 ```
 
@@ -120,7 +116,7 @@ Run a CPU smoke test:
 
 ```powershell
 python -m synvulcommit.run_experiments `
-  --prepared experiments\release_91_v1 `
+  --prepared experiments\<release_name> `
   --word2vec ..\w2v\word2vec_withString10-300-200.model `
   --smoke `
   --epochs 1
@@ -130,14 +126,14 @@ Run the full comparison:
 
 ```powershell
 python -m synvulcommit.run_experiments `
-  --prepared experiments\release_91_v1 `
+  --prepared experiments\<release_name> `
   --word2vec ..\w2v\word2vec_withString10-300-200.model
 ```
 
 The full experiment writes:
 
 ```text
-experiments/release_91_v1/
+experiments/<release_name>/
   audit/
   features/
   manifests/
@@ -154,25 +150,20 @@ results/comparison.md
 results/confusion_matrices/
 ```
 
-## Final Result Summary
+## Result Interpretation
 
-The final run showed that real-only training remained strongest overall. Synthetic-only training transferred poorly to the real VUDENC test set, mostly because synthetic generated files often produced too few clean negative windows under the 200-token VUDENC windowing setup. The combined real+synthetic condition slightly helped LSTM but did not consistently improve MLP, Random Forest, or CNN.
+Use the generated `results/metrics.csv`, `results/comparison.md`, and confusion matrices for conclusions. In general, compare:
 
-Mean macro-F1 by model family and condition:
+- A vs. B to test whether synthetic-only training transfers to real VUDENC data,
+- A vs. C to test whether synthetic data improves a real-data baseline,
+- per-CWE scores to avoid hiding category-specific behavior behind aggregate metrics.
 
-| Model | A real-only | B synthetic-only | C real+synthetic |
-| --- | ---: | ---: | ---: |
-| CNN | 0.6124 | 0.3662 | 0.6080 |
-| LSTM | 0.5407 | 0.4289 | 0.5605 |
-| MLP | 0.6463 | 0.3577 | 0.6421 |
-| Random Forest | 0.6618 | 0.3419 | 0.6415 |
-
-The result does not mean the generator failed. It means the synthetic corpus is useful as a controlled data-generation artifact, but its distribution is not yet a drop-in replacement for real VUDENC commits under the exact Lab 3 window-labeling setup.
+The submitted Lab 5 run showed that synthetic data is most useful as controlled augmentation, not as a direct replacement for real vulnerability-fixing commits. Exact metrics are provided in the release artifact bundle and in the submitted report.
 
 ## Known Limitations
 
-- Synthetic files are often shorter and more focused than real commits.
-- Synthetic-only training creates a positive-heavy window distribution.
+- Synthetic files can still differ from real commits in style and distribution.
+- Synthetic-only training may not transfer cleanly to real VUDENC test windows.
 - The reviewer improves semantic confidence but cannot fully guarantee realism.
 - The generated corpus is Python-only and tied to the seven VUDENC-style CWE modes.
 - The experiment evaluates transfer to real VUDENC windows, not production vulnerability detection.

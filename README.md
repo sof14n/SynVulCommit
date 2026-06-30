@@ -2,7 +2,7 @@
 
 SynVulCommit is the Lab 5 mini-project for generating and evaluating synthetic vulnerability-fixing commits. It creates paired vulnerable/fixed Python code for the seven VUDENC vulnerability modes, validates the pair with deterministic checks and security analyzers, optionally gates it with a second LLM reviewer, exports a clean VUDENC-style training format, and runs a controlled A/B/C comparison against real VUDENC data.
 
-The repository contains the implementation and report sources. Generated datasets, provider logs, `.env` files, virtual environments, and large experiment outputs are intentionally not committed.
+The repository contains the implementation, validation rules, tests, and reproducibility documentation. Generated datasets, provider logs, `.env` files, virtual environments, reports, trained models, and large experiment outputs are intentionally not committed.
 
 ## Project Scope
 
@@ -11,7 +11,7 @@ The project has two connected parts:
 - **Dataset generator:** produces accepted vulnerable/fixed commit pairs with quota-based context coverage, duplicate rejection, deterministic validation, LLM review, VUDENC export, and dataset verification.
 - **Evaluation pipeline:** prepares balanced real/synthetic commit splits and evaluates LSTM, MLP, Random Forest, and CNN models under three conditions: real-only, synthetic-only, and real+synthetic training.
 
-The final balanced synthetic experiment release used 91 accepted pairs per CWE, 637 pairs total, selected from a verified generated corpus.
+Large reproducibility artifacts are published separately as GitHub Release assets. The submitted Lab 5 artifact release contains the final generated dataset, rejected-attempt audit log, VUDENC export, experiment manifests, metrics, and trained model outputs.
 
 ## Setup
 
@@ -76,14 +76,14 @@ Re-export accepted samples to VUDENC format:
   --out output_pilot\vudenc
 ```
 
-Prepare the A/B/C experiment dataset, assuming a generated synthetic JSONL exists locally:
+Prepare an A/B/C experiment dataset, assuming a generated synthetic JSONL exists locally. Choose `--per-cwe` based on the minimum accepted count available across the CWE modes you want to balance:
 
 ```powershell
 .\.venv\Scripts\python -m synvulcommit.prepare_experiment `
   --synthetic output_pilot\samples.jsonl `
   --vudenc-root ..\data `
-  --out experiments\release_91_v1 `
-  --per-cwe 91 `
+  --out experiments\<release_name> `
+  --per-cwe <N> `
   --seed 20260624
 ```
 
@@ -91,7 +91,7 @@ Run the model comparison:
 
 ```powershell
 python -m synvulcommit.run_experiments `
-  --prepared experiments\release_91_v1 `
+  --prepared experiments\<release_name> `
   --word2vec ..\w2v\word2vec_withString10-300-200.model
 ```
 
@@ -101,7 +101,6 @@ python -m synvulcommit.run_experiments `
 synvulcommit/                 Generator, validation, export, verification, and experiment code
 synvulcommit/rules/           SynVulCommit Semgrep rules for the seven CWE modes
 tests/                        Unit and integration-style tests
-scripts/                      Report figure generation helpers
 docs/                         Detailed documentation
 requirements.txt              Generator and validation dependencies
 requirements-experiments.txt  Model evaluation dependencies
@@ -117,6 +116,19 @@ Detailed documentation:
 ## Notes On Mock Mode
 
 The mock provider exists for parser and pipeline tests. It does not represent final dataset quality and is not a substitute for real provider generation. Because the production planner now enforces context-specific quota slots, static mock fixtures can become stale when validation rules change. Real production runs should use an actual provider plus strict validation and review.
+
+## Artifacts And Submission
+
+The GitHub repository is kept code-focused. Large generated artifacts are not tracked in Git.
+
+The final dataset, rejected audit log, VUDENC export, trained model outputs, split manifests, metrics, and confusion matrices are provided as GitHub Release assets:
+
+```text
+https://github.com/sof14n/SynVulCommit/releases/tag/v1.0-lab5
+```
+
+The report is submitted separately through Overleaf and is intentionally excluded from this repository.
+
 GitHub repository link:
 
 ```text
