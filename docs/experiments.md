@@ -242,6 +242,33 @@ The final report snapshot recorded a verified window-balanced corpus of 1,205 ac
 | XSRF | 200 | 149 | 141 |
 
 The balanced synthetic subset therefore contained 1,043 records. The run evaluated all eight variants. Its recorded mean macro-F1 across the seven CWEs was:
+```text
+experiments/<release_name>/
+  audit/
+  features/
+  manifests/
+  models/
+  results/
+  dataset_summary.json
+```
+
+Important result files:
+
+```text
+results/metrics.csv
+results/comparison.md
+results/confusion_matrices/
+```
+
+## Result Interpretation
+
+Use the generated `results/metrics.csv`, `results/comparison.md`, and confusion matrices for conclusions. In general, compare:
+
+- A vs. B to test whether synthetic-only training transfers to real VUDENC data,
+- A vs. C to test whether synthetic data improves a real-data baseline,
+- per-CWE scores to avoid hiding category-specific behavior behind aggregate metrics.
+
+The submitted Lab 5 run showed that synthetic data is most useful as controlled augmentation, not as a direct replacement for real vulnerability-fixing commits. Exact metrics are provided in the release artifact bundle and in the submitted report.
 
 | Model | A real-only | B synthetic-only | C mixed |
 | --- | ---: | ---: | ---: |
@@ -255,6 +282,11 @@ The balanced synthetic subset therefore contained 1,043 records. The run evaluat
 | CNN GraphCodeBERT | 0.6140 | 0.4201 | 0.6232 |
 
 These are historical reported results, not a fresh run from the current clone: the raw release, model files, and result CSV were removed from version control. Reproduction requires the external inputs listed above.
+- Synthetic files can still differ from real commits in style and distribution.
+- Synthetic-only training may not transfer cleanly to real VUDENC test windows.
+- The reviewer improves semantic confidence but cannot fully guarantee realism.
+- The generated corpus is Python-only and tied to the seven VUDENC-style CWE modes.
+- The experiment evaluates transfer to real VUDENC windows, not production vulnerability detection.
 
 The strongest recorded configuration was mixed-training Word2Vec MLP at 0.7161 mean macro-F1. Synthetic-only training was below the corresponding real-only result for every variant except LSTM CodeBERT, whose three results were all relatively weak. Frozen transformer representations did not outperform the strongest Word2Vec models.
 
