@@ -1,178 +1,232 @@
 # Dataset Format And Verification
 
-This document describes the internal dataset logs, the clean VUDENC export, and the verifier.
+SynVulCommit keeps rich internal JSONL records for audit and recovery, then derives a smaller VUDENC-compatible export for model input. The internal logs, metadata sidecar, and verifier report are not training data.
 
-## Internal Logs
+## Output Directory Contract
 
-Generation writes internal audit logs to the selected output directory:
+A normal generation run with export enabled writes:
 
 ```text
-samples.jsonl
-rejected.jsonl
-diversity_summary.json
-dataset_verification.json
-vudenc/
+<output>/
+  samples.jsonl
+  rejected.jsonl
+  diversity_summary.json
+  dataset_verification.json
+  vudenc/
+    metadata.jsonl
+    plain_sql
+    plain_command_injection
+    plain_directory_traversal
+    plain_open_redirect
+    plain_remote_code_execution
+    plain_xss
+    plain_xsrf
 ```
 
-`samples.jsonl` contains accepted records. These records preserve detailed generation, context, validation, review, and provenance fields. They are useful for auditing and rebuilding exports, but they are not the final model-input format.
+`samples.jsonl` and `rejected.jsonl` are created before generation begins and are append-only during a normal run. `diversity_summary.json` is rewritten at the end of each run. `vudenc/` and `dataset_verification.json` are rebuilt unless `--no-export` is supplied.
 
-`rejected.jsonl` contains failed attempts. It is intentionally more detailed than training exports so failures can be diagnosed. It should not be used as training input.
+## Accepted Record Schema
 
-`diversity_summary.json` reports quota coverage and unfilled slots.
+Every line of `samples.jsonl` is one accepted JSON object with these fields:
 
-`dataset_verification.json` is an aggregate audit report. It is not training input.
+| Field | Content |
+| --- | --- |
+| `id` | Accepted sample ID such as `CWE-89_sql_000001`. |
+| `cwe`, `cwe_name`, `mode` | Canonical vulnerability identity. |
+| `context` | Full generation specification: CWE fields, application type, flow, difficulty, structure, sample index, and generation profile. |
+| `generation_profile` | Top-level `compact` or `window_balanced` copy for compatibility. |
+| `attempt` | Attempt number within that planned slot. |
+| `commit_message`, `filename` | Commit-like description and relative Python filename. |
+| `vulnerable_code`, `fixed_code` | Complete normalized source versions. |
+| `diff` | Locally generated unified diff. |
+| `badparts`, `goodparts` | Exact vulnerable/fixed fragments used by VUDENC labeling. |
+| `provider` | Generation provider type. |
+| `validation` | Structural, analyzer, warning/reason, and optional window-balance evidence. |
+| `review` | Required/completed/skipped state and parsed reviewer assessment. |
+
+The current generation path does not persist raw provider responses, generation prompts, reviewer prompts, reviewer raw responses, API endpoints, or credentials.
+
+`validation` contains `passed`, `reasons`, `warnings`, `structural`, and separate `bandit_before`, `bandit_after`, `semgrep_before`, and `semgrep_after` objects. `window_balanced` records also contain `window_balance`.
+
+## Rejected Record Variants
+
+`rejected.jsonl` is intentionally heterogeneous because failure can happen at different stages:
+
+- provider failures contain context, profile, attempt, provider, review-not-run state, and a safe rejection reason, but no generated source;
+- structural/analyzer failures contain the full candidate and validation object;
+- reviewer failures contain the full candidate, passing deterministic validation, parsed/error review state, and rejection reason;
+- diversity failures contain the full candidate plus `diversity_rejection` diagnostics.
+
+Rejected candidate IDs are prospective and are not guaranteed to be unique. Only accepted records advance the persistent sample-ID sequence. Rejected data is diagnostic and must not be used as positive training input.
+
+## Diversity Summary
+
+`diversity_summary.json` combines:
+
+- total indexed accepted records and context distributions;
+- duplicate-rejection counts and policy parameters;
+- per-CWE quota coverage, including existing, planned, accepted, rejected attempts, and unfilled slots;
+- marginal and full-tuple context counts and uncovered values;
+- worker throughput and provider/validation/reviewer work time;
+- reviewer pass/rejection/error counts for the run.
+
+The timing values are operational measurements, not deterministic dataset properties.
 
 ## Clean VUDENC Export
 
-The model-facing export is `vudenc/plain_<mode>`.
+Each extensionless `vudenc/plain_<mode>` file is JSON with the VUDENC-style nesting:
 
-Each `plain_<mode>` file is a strict VUDENC-style commit structure. It contains only:
+```text
+repository alias
+  -> commit id
+     -> msg
+     -> files
+        -> relative filename
+           -> source
+           -> sourceWithComments
+           -> sourcecodeafter
+           -> changes[]
+```
 
-- `msg`,
-- `files[filename].source`,
-- `sourceWithComments`,
-- `sourcecodeafter`,
-- `changes` with:
-  - unified diff,
-  - add/remove counts,
-  - relative filename,
-  - `badparts`,
-  - `goodparts`.
+Each change object contains exactly:
 
-The export intentionally excludes:
+- `diff`;
+- `add`, the number of exported `goodparts`;
+- `remove`, the number of exported `badparts`;
+- `filename`;
+- `badparts`;
+- `goodparts`.
 
-- local filesystem paths,
-- commands,
-- raw validation objects,
-- raw reviewer objects,
-- provider payloads,
-- endpoint URLs,
-- credentials or authorization data,
-- temporary directories,
-- tracebacks.
+The exporter creates repository aliases as `synvulcommit/<mode>` and normally uses the internal sample ID as the commit ID. It writes all seven `plain_<mode>` files even when a mode has no records.
 
-The training contract is that downstream VUDENC-style models consume vulnerable source and changed vulnerable fragments, especially `files[].source` and `changes[].badparts`.
+The training contract uses vulnerable source and changed vulnerable fragments, especially `files[filename].source`/`sourceWithComments` and `changes[].badparts`. `sourcecodeafter` and `goodparts` preserve the paired fix for repair-oriented uses.
+
+## Export Sanitization
+
+The clean files intentionally exclude internal context, validation, analyzer commands, raw findings, review objects, provider payloads, local paths, tracebacks, endpoints, and credentials.
+
+Before export:
+
+- filenames are converted to safe relative paths;
+- unsafe commit messages are replaced with `Synthetic security fix`;
+- a diff containing unsafe path-like metadata is regenerated from source and the sanitized filename;
+- missing changed parts are re-derived from the diff.
+
+This is a narrow export allowlist, not a general secret scanner for generated source. Generated source itself is model data and is therefore preserved.
 
 ## Metadata Sidecar
 
-Every export also writes:
+`vudenc/metadata.jsonl` contains one sanitized row per accepted record, in the same per-mode export order. It links audit records to clean commits without copying source code.
 
-```text
-vudenc/metadata.jsonl
-```
+Every row contains:
 
-This file has one sanitized row per exported accepted sample. It links the internal record to the exported plain file without copying source code or raw tool payloads.
+- `id`, `cwe`, `cwe_name`, and `mode`;
+- `plain_file`, `row_index`, `repo`, `commit_id`, and `filename`;
+- `generation_profile`;
+- allowlisted `context`;
+- allowlisted `provenance`;
+- `validation_summary`;
+- optional `review_summary`.
 
-Allowed sidecar fields include:
+Allowlisted context fields are CWE identity, mode, application type, flow, difficulty, structure, and sample index. Allowlisted provenance keys are `provider`, `model`, `prompt_sha256`, `seed`, `attempt`, and `generated_at` when present. Current generator records normally provide `provider` and `attempt`; the remaining keys support compatible imported/legacy records.
 
-- sample id,
-- CWE and mode,
-- plain export filename,
-- row index,
-- repository and commit id aliases used in the export,
-- filename,
-- generation context,
-- generation profile,
-- provider/model when present,
-- prompt hash,
-- seed,
-- attempt,
-- generation timestamp,
-- validation pass state and safe summaries,
-- optional window-balance summary for `window_balanced` records,
-- Bandit/Semgrep statuses and safe rule ids,
-- reviewer verdict summary.
+The validation summary contains only pass state, reason/warning counts, structural markers, safe tool statuses/finding IDs, and optional numeric window-balance measurements. The review summary contains required/status/verdict/category/provider/model and boolean assessments when available.
 
-The sidecar excludes commands, absolute paths, temporary directories, return payloads, tracebacks, raw findings, endpoint URLs, authorization values, API keys, and source code.
+The sidecar excludes source, diffs, commands, raw findings, raw payloads, absolute paths, URLs, authorization values, API keys, and tracebacks. It is audit metadata and must be excluded from model training.
 
-`metadata.jsonl` is for audit and provenance only. It should be excluded from model-training pipelines.
+## Export Command
 
-## Dataset Verification
-
-Run the verifier against an accepted JSONL:
+Rebuild exports from accepted records:
 
 ```powershell
-.\.venv\Scripts\python -m synvulcommit.verify_dataset --input output_pilot\samples.jsonl
+.\.venv\Scripts\python -m synvulcommit.export_vudenc `
+  --input output\samples.jsonl `
+  --out output\vudenc
 ```
 
-Defaults are derived from the input path:
+CLI defaults are `output/samples.jsonl` and `output/vudenc`. Existing expected files are overwritten. The command does not validate candidates again; run the verifier afterward when exporting manually.
 
-- rejected log: `rejected.jsonl`,
-- VUDENC export directory: `vudenc/`,
-- report path: `dataset_verification.json`.
+## Dataset Verifier
 
-The verifier exits `0` for a clean dataset and `1` for verification errors.
+Run:
 
-It reports:
+```powershell
+.\.venv\Scripts\python -m synvulcommit.verify_dataset `
+  --input output\samples.jsonl
+```
 
-- accepted and rejected counts by CWE and mode,
-- counts by context dimension,
-- full context tuple counts,
-- duplicate rates in policy order,
-- validation pass/fail/missing/warning summaries,
-- structural status,
-- Bandit and Semgrep before/after status distributions,
-- reviewer pass/fail/legacy counts,
-- rejection breakdowns by safe category,
-- export integrity results.
+Paths default relative to the accepted JSONL:
 
-Validation warnings are counted but are not fatal.
+| Input | Default |
+| --- | --- |
+| rejected log | sibling `rejected.jsonl` |
+| VUDENC directory | sibling `vudenc/` |
+| report | sibling `dataset_verification.json` |
 
-## Fatal Verification Errors
+Override them with `--rejected`, `--vudenc`, and `--out`. The verifier writes a schema-versioned aggregate JSON report and exits `0` only when its status is `pass`; verification errors return `1`.
 
-Verification fails for:
+### Report Sections
 
-- missing validation on accepted records,
-- failed validation on accepted records,
-- reviewer-required accepted records without a complete pass,
-- duplicate accepted records under the active diversity policy,
-- post-fix SynVulCommit Semgrep findings,
-- unknown modes,
-- duplicate sample ids,
-- orphaned commits,
-- missing or duplicate metadata rows,
-- malformed `plain_<mode>` schema,
-- extra forbidden export fields,
-- exported source/diff/badparts/goodparts mismatch.
+The report contains:
 
-The report contains aggregate counts and safe identifiers only. It does not copy generated source code or raw analyzer/provider payloads.
+- accepted totals and per-CWE context/full-tuple coverage;
+- policy-ordered duplicate counts and rates;
+- accepted validation pass/fail/missing and warning counts;
+- structural status and Bandit/Semgrep before/after status distributions;
+- post-fix SynVulCommit Semgrep rule IDs;
+- accepted and rejected reviewer summaries;
+- rejected counts by mode, safe category, context, and diversity check;
+- expected/actual export counts and integrity errors;
+- a final safe error list containing codes and, where safe, sample IDs/modes.
 
-## Revalidation And Rebuilds
+Warnings stored on otherwise passing validation records are counted but are not fatal by themselves.
 
-When validation rules are strengthened, existing generated outputs should not be edited manually. Rebuild into a new output directory:
+### Fatal Conditions
+
+Verification fails for any of the following:
+
+- missing/unreadable accepted or rejected JSONL;
+- accepted records with missing or failed validation;
+- missing or failed structural validation;
+- a `window_balanced` record without window-balance validation data;
+- reviewer-required accepted records without a complete passing assessment;
+- duplicates under the current exact/AST/near-duplicate policy;
+- any disallowed post-fix SynVulCommit Semgrep finding;
+- duplicate accepted IDs or unknown modes;
+- missing, extra, invalid, or mismatched `plain_<mode>` files;
+- missing, invalid, duplicate/mismatched, or broken metadata links;
+- any exported source, diff, filename, badpart, goodpart, message, or schema difference from a clean rebuild of the accepted records.
+
+Integrity is checked by rebuilding the expected plain payloads and metadata in memory and comparing them with disk. This catches both missing data and extra/forbidden fields.
+
+The report deliberately stores aggregate counts and safe issue identifiers rather than copying generated code or unsafe diagnostic strings.
+
+## Revalidation And Quarantine
+
+When rules change, rebuild an older accepted corpus into a different empty directory:
 
 ```powershell
 .\.venv\Scripts\python -m synvulcommit.revalidate_dataset `
   --input output_old `
   --output output_revalidated `
   --require-tools `
-  --workers 16
+  --workers 10
 ```
 
-Passing records keep their code, context, provenance, and existing reviewer result, but receive the new validation result. Failing records are quarantined into the new `rejected.jsonl` with a `revalidation` marker.
+The command requires `--input/samples.jsonl`, refuses to use the same source and destination, and refuses a non-empty destination. It reconstructs each generation specification and candidate from the accepted record, then reruns current deterministic/analyzer validation concurrently.
 
-The command writes:
+Passing records retain their ID, code, context, generation fields, and previous reviewer result, but receive the new validation object. Failures move to the new `rejected.jsonl` with a `revalidation` block containing the source ID, quarantine status, and safe reason categories.
+
+The rebuilt directory contains:
 
 ```text
-revalidation_summary.json
 samples.jsonl
 rejected.jsonl
-vudenc/
+revalidation_summary.json
 dataset_verification.json
+vudenc/
 ```
 
-The source output directory remains unchanged.
+Revalidation always rebuilds exports and runs verification. Its CLI exits `0` only when the rebuilt verification passes; invalid arguments or a failed rebuilt verification return nonzero. The source directory is never modified.
 
-After revalidation, resume generation into the rebuilt directory to fill deficits:
-
-```powershell
-.\.venv\Scripts\python -m synvulcommit.run_generation `
-  --output output_revalidated `
-  --provider openai_compatible `
-  --require-tools `
-  --workers 16 `
-  --max-attempts 8 `
-  --per-cwe 100
-```
-
-Sample ids continue after the highest retained numeric suffix, so retained records with gaps do not collide with newly generated records.
+Afterward, normal generation can resume into the rebuilt directory. New accepted IDs continue after the highest retained numeric suffix, so quarantined gaps do not collide with new records.

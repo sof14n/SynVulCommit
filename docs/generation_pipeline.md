@@ -1,147 +1,209 @@
 # Generation Pipeline
 
-This document explains how SynVulCommit generates accepted vulnerable/fixed commit pairs.
+This document describes the current `synvulcommit.run_generation` workflow. The implementation is resumable, quota-driven, concurrent, and deliberately fails closed when strict validation or final dataset verification does not pass.
 
-## Pipeline Overview
+## Command And Defaults
 
-Each generation run follows the same stages:
+Run from the repository root:
 
-1. Plan quota slots for each CWE and context.
-2. Ask a provider for a vulnerable/fixed Python pair.
-3. Normalize the provider JSON into a commit candidate.
-4. Run deterministic structural validation.
-5. Run Bandit and Semgrep when available.
-6. Run the second-stage LLM reviewer unless explicitly disabled.
-7. Reject exact and near-duplicate vulnerable/fixed pairs.
-8. Store accepted records in `samples.jsonl` and rejected attempts in `rejected.jsonl`.
-9. Export VUDENC files and verify the dataset, unless `--no-export` is used.
+```powershell
+.\.venv\Scripts\python -m synvulcommit.run_generation [options]
+```
 
-The generator treats `--per-cwe` as the target accepted count per CWE. Existing accepted records in the selected output directory count toward the target, so rerunning a partial output resumes from the remaining deficit.
+Important defaults:
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `--per-cwe` | `1` | Target accepted records per selected CWE, including resumable existing records of the selected profile. |
+| `--provider` | `mock` | `mock`, `openai_compatible`, or `local_http`. |
+| `--output` | `output` | Internal logs and exports directory. |
+| `--seed` | `1337` | Deterministic quota-planning seed. |
+| `--max-attempts` | `5` | Attempts for each planned context slot. |
+| `--generation-profile` | `compact` | `compact` or `window_balanced`. |
+| `--workers` | `10` | Maximum concurrent slot pipelines. |
+| reviewer | enabled | Reuses the generation provider unless `--review-provider` is set. |
+| analyzer strictness | non-strict | Add `--require-tools` for production data. |
+| export | enabled | Add `--no-export` to skip VUDENC export and final verification. |
+
+Repeat `--cwe` to select modes, keys, or CWE identifiers, for example `--cwe sql --cwe CWE-79`. With no filter, all seven modes are planned.
+
+## Pipeline Stages
+
+Each planned slot follows this order:
+
+1. Build a deterministic `GenerationSpec` containing CWE, application type, flow pattern, structure, difficulty, sample index, and profile.
+2. Build a strict JSON-only prompt and call the configured provider.
+3. Normalize the response into one Python before/after pair.
+4. Build the unified diff locally and derive `badparts` and `goodparts`.
+5. Run syntax, known-framework-import, requested-context, CWE-specific structural, and profile checks.
+6. Scan the vulnerable and fixed files with Bandit and the repository Semgrep rules.
+7. Run the blinded reviewer when review is enabled.
+8. Reject exact, normalized-AST, and near-duplicate code pairs.
+9. Append the accepted record to `samples.jsonl`, or append diagnostic data to `rejected.jsonl`.
+
+After all slots finish, the run writes `diversity_summary.json`. Unless `--no-export` is set, it then rebuilds `vudenc/`, writes `dataset_verification.json`, and fails if verification reports any error.
+
+The generator is append-oriented for internal JSONL logs. It does not edit previously accepted records during a normal resumed run.
+
+## Supported Modes And Contexts
+
+| Mode | CWE | Planned application types |
+| --- | --- | --- |
+| `sql` | CWE-89 SQL injection | Flask, Django, API, script |
+| `command_injection` | CWE-78 OS command injection | Flask, Django, CLI, API, script |
+| `directory_traversal` | CWE-22 path traversal | Flask, API, CLI, script |
+| `open_redirect` | CWE-601 open redirect | Flask, Django, API |
+| `remote_code_execution` | CWE-94 remote code execution | Flask, Django, CLI, API, script |
+| `xss` | CWE-79 cross-site scripting | Flask, Django, API |
+| `xsrf` | CWE-352 cross-site request forgery | Flask only |
+
+The remaining context dimensions are:
+
+- flow: `direct`, `indirect`, or `complex`;
+- difficulty: `easy`, `medium`, or `hard`;
+- structure: `single_function`, `class_based`, or `multi_function`.
+
+Not every combination is valid. `single_function` only supports direct flow; `multi_function` supports indirect and complex flow; `class_based` supports all three. The `window_balanced` profile excludes `single_function` entirely.
+
+## Deterministic Quota Planning And Resume
+
+For each CWE, compatible context tuples are scored in this exact order:
+
+1. full tuple count;
+2. application-type marginal count;
+3. flow-pattern marginal count;
+4. structure marginal count;
+5. difficulty marginal count;
+6. structure/flow flexibility, preferring the less flexible structure when counts tie;
+7. a stable SHA-256 tie-break based on seed, CWE, slot, and tuple.
+
+Existing accepted records count only when their CWE/mode and generation profile match the current plan. Legacy records without a profile are treated as `compact`. Existing context counts steer later slots toward underrepresented tuples.
+
+Rejected candidates retry the same `GenerationSpec`; rejection does not randomize or replace its planned context. `diversity_summary.json` records existing, planned, accepted, rejected-attempt, and unfilled counts together with marginal and full-tuple coverage.
+
+`--per-cwe` is a target, not an increment. If an output already contains the target number for a selected CWE/profile, the provider is not called for that CWE.
 
 ## Generation Profiles
 
-The default generation profile is `compact`. It keeps the existing small-file prompt and validation behavior used for the current corpus.
+### `compact`
 
-`window_balanced` is an opt-in profile for later datasets intended to work better with the Lab 3/VUDENC 200-token windowing setup. It changes prompt requirements and validation:
+This is the default and the profile of the reported corpus. Its prompt requests self-contained files under 55 lines and 2,800 characters. Those two size limits are prompt requirements rather than separate validator thresholds.
 
-- vulnerable modules should contain 420-900 code tokens,
-- there must be clean security-neutral context before and after the vulnerable region,
-- badparts must remain localized and cover no more than 15% of vulnerable source tokens,
-- the vulnerable source must produce at least one positive and one negative 200-token window,
-- the fixed source must retain at least 75% of the vulnerable source token count,
-- `single_function` quota slots are excluded because they conflict with surrounding clean context.
+### `window_balanced`
 
-Use:
+This profile adds enforced validation intended for 200-token VUDENC-style windowing:
 
-```powershell
-.\.venv\Scripts\python -m synvulcommit.run_generation `
-  --output output_window_balanced_v1 `
-  --provider openai_compatible `
-  --require-tools `
-  --generation-profile window_balanced `
-  --per-cwe 100
+- vulnerable source must contain 420-900 code tokens;
+- `badparts` must cover no more than 15% of vulnerable tokens;
+- vulnerable source must yield at least one positive and one negative 200-token window using stride 5;
+- fixed source must retain at least 75% of the vulnerable token count;
+- `single_function` slots are excluded.
+
+The prompt additionally asks for meaningful clean context before and after a localized security change. The profile is stored in the internal record and sanitized metadata sidecar; it does not alter the clean `plain_<mode>` schema.
+
+## Provider Response Contract
+
+The generation provider is asked for exactly one JSON object:
+
+```json
+{
+  "commit_message": "short Git-style security fix message",
+  "filename": "relative/path.py",
+  "vulnerable_code": "complete vulnerable Python file",
+  "fixed_code": "complete fixed Python file",
+  "vulnerable_lines": ["exact source line"],
+  "fixed_lines": ["exact source line"]
+}
 ```
 
-The profile is stored in internal records and summarized safely in `metadata.jsonl`. The clean `plain_<mode>` VUDENC files are unchanged.
+`commit_message`, `vulnerable_code`, and `fixed_code` are required. A missing filename becomes `app.py`; a filename without `.py` receives that suffix. Newlines are normalized and a trailing newline is added.
 
-## Supported Modes
+The generator ignores any provider-supplied diff and builds its own. Exact explicit vulnerable/fixed lines are used only when every listed line is present in the corresponding source. Otherwise changed diff lines are used. CWE-specific inference is a final fallback when a side has no changed parts. A candidate still fails validation if its final `badparts` or `goodparts` list is empty.
 
-SynVulCommit covers the seven VUDENC-style vulnerability modes:
-
-| Mode | CWE |
-| --- | --- |
-| `sql` | CWE-89 SQL Injection |
-| `command_injection` | CWE-78 OS Command Injection |
-| `directory_traversal` | CWE-22 Path Traversal |
-| `open_redirect` | CWE-601 Open Redirect |
-| `remote_code_execution` | CWE-94 Remote Code Execution |
-| `xss` | CWE-79 Cross-Site Scripting |
-| `xsrf` | CWE-352 Cross-Site Request Forgery |
-
-## Quota Planning
-
-Generation uses deterministic quota planning over four context dimensions:
-
-- application type,
-- flow pattern,
-- difficulty,
-- program structure.
-
-The planner forms compatible context tuples for each CWE. It then chooses the next slot by lowest quota score:
-
-1. full context tuple count,
-2. application-type count,
-3. flow-pattern count,
-4. structure count,
-5. difficulty count,
-6. stable SHA-256 tie-breaker.
-
-Rejected candidates retry the same planned slot. They are not replaced with random contexts. This makes the corpus easier to audit because failures are tied to specific planned coverage targets.
-
-Each run writes `diversity_summary.json`, including planned, accepted, rejected, and unfilled counts per CWE; marginal context distributions; full tuple distributions; and uncovered values or tuples.
+Raw provider responses are kept only in memory and are not written to accepted records or clean exports.
 
 ## Provider Configuration
 
-Three provider types are supported:
+The code reads environment variables directly; it does not automatically load a `.env` file.
 
-- `mock`: deterministic local fixture provider for tests and parser checks.
-- `openai_compatible`: chat-completions-style HTTP API.
-- `local_http`: local model endpoint such as Ollama-compatible generation.
+### OpenAI-compatible HTTP
 
-OpenAI-compatible generation reads:
+`SYNVUL_API_KEY` and `SYNVUL_MODEL` are required. Other generation settings are:
 
-```text
-SYNVUL_BASE_URL
-SYNVUL_API_KEY
-SYNVUL_MODEL
-SYNVUL_TEMPERATURE
-SYNVUL_MAX_TOKENS
-SYNVUL_REQUEST_TIMEOUT
-SYNVUL_RESPONSE_FORMAT
+| Variable | Default |
+| --- | --- |
+| `SYNVUL_BASE_URL` | `https://api.openai.com/v1` |
+| `SYNVUL_TEMPERATURE` | `0.2` |
+| `SYNVUL_MAX_TOKENS` | `1800` |
+| `SYNVUL_REQUEST_TIMEOUT` | `180` seconds |
+| `SYNVUL_RESPONSE_FORMAT` | unset; `json_object` is automatically used for DeepSeek URLs |
+| `SYNVUL_THINKING_MODE` | unset; accepts `enabled` or `disabled` |
+
+The request URL is `<base URL>/chat/completions`. For DeepSeek, for example:
+
+```powershell
+$env:SYNVUL_BASE_URL="https://api.deepseek.com"
+$env:SYNVUL_API_KEY="your_api_key"
+$env:SYNVUL_MODEL="deepseek-chat"
 ```
 
-For DeepSeek, use `SYNVUL_BASE_URL=https://api.deepseek.com` and set `SYNVUL_MODEL` to an enabled DeepSeek model. Secrets must stay in the environment or a local ignored `.env` file. They must not be committed.
+### Local HTTP
 
-Local HTTP generation reads:
+`SYNVUL_LOCAL_URL` is required. Supported settings are:
 
-```text
-SYNVUL_LOCAL_URL
-SYNVUL_LOCAL_MODEL
-SYNVUL_LOCAL_AUTH
-SYNVUL_LOCAL_FORMAT
-```
+| Variable | Default/behavior |
+| --- | --- |
+| `SYNVUL_LOCAL_MODEL` | Optional model name in the request body. |
+| `SYNVUL_LOCAL_AUTH` | Optional complete `Authorization` header value. |
+| `SYNVUL_LOCAL_FORMAT` | `json` |
+| `SYNVUL_TEMPERATURE` | `0.2` |
+| `SYNVUL_NUM_PREDICT` | `4096` |
+| `SYNVUL_REQUEST_TIMEOUT` | `180` seconds |
+
+The local request includes both a combined `prompt` and chat-style `messages` to support common Ollama-compatible response shapes.
+
+### Separate Reviewer Configuration
+
+Without `--review-provider`, review uses the generation provider and its normal `SYNVUL_*` settings. Supplying `--review-provider` switches that provider to the equivalent `SYNVUL_REVIEW_*` namespace, such as `SYNVUL_REVIEW_API_KEY`, `SYNVUL_REVIEW_MODEL`, or `SYNVUL_REVIEW_LOCAL_URL`.
+
+`SYNVUL_REVIEW_MAX_TOKENS` controls reviewer output in both cases; its default is `512` and its accepted range is 128-8192.
 
 ## Deterministic Validation
 
-The structural validator checks that a candidate actually matches the requested CWE and context. Examples:
+Both files must parse as Python. For a small allowlist of known Flask, Flask-WTF, WTForms, Django, and MarkupSafe modules, imported symbol names are also checked to catch invented APIs.
 
-- SQL vulnerable code must contain dynamic SQL execution, and fixed code must use static queries with placeholders and bound values.
-- Command injection fixed code must avoid shell execution and use safe subprocess argument lists.
-- Directory traversal fixed code must use path-aware containment such as resolved parent membership, `relative_to` / `is_relative_to`, component-aware `commonpath`, or safe join patterns.
-- Open redirect fixed code must validate redirect targets.
-- RCE fixed code must remove dynamic execution and use a safe parser or dispatch strategy.
-- XSS fixed code must escape or template-render safely.
-- XSRF fixed code must show CSRF protection or remove explicit CSRF disabling.
+The validator checks the requested application type, structure, and flow when applicable, then enforces mode-specific evidence:
 
-The validator also checks requested application type, flow pattern, and structure when those are meaningful for the CWE.
+- SQL: dynamic vulnerable query execution; fixed static query text with appropriate placeholders and bound values; additional Django serialization checks.
+- Command injection: vulnerable shell execution; fixed argument-list subprocess use without `shell=True` or `os.system`.
+- Path traversal: unchecked user path before; path-aware containment after. String-prefix checks are not accepted.
+- Open redirect: unchecked redirect before; parsed/local or allowlisted target after.
+- RCE: `eval`, `exec`, or equivalent before; no dynamic execution and a literal parser or fixed dispatch strategy after.
+- XSS: unescaped HTML flow before; escaping or safe template binding after.
+- XSRF: missing/disabled protection before; correctly initialized CSRF protection after.
 
-## Analyzer Validation
+These checks establish recognizable dataset patterns; they are not a general proof of application security.
 
-Bandit and Semgrep are optional unless `--require-tools` is set. With `--require-tools`, missing or failing tools reject the candidate.
+## Bandit And Semgrep Policy
 
-Semgrep uses the SynVulCommit rules under `synvulcommit/rules/`. The validation policy requires the expected target-CWE finding before the fix and rejects any configured SynVulCommit CWE rule that remains in the fixed code, including rules from a different CWE.
+The vulnerable and fixed files are scanned together per tool and findings are split back by path.
 
-This cross-CWE post-fix policy exists because generated samples sometimes accidentally retained unrelated vulnerabilities, such as SQL construction inside non-SQL samples.
+When tools run successfully:
+
+- a missing expected Bandit finding before the fix is a warning;
+- an expected Bandit finding remaining after the fix is fatal;
+- the expected target-CWE Semgrep finding must appear before the fix;
+- no target-CWE or cross-CWE SynVulCommit Semgrep finding may remain after the fix.
+
+There is one narrow XSS exception: an `xss-helper` finding may remain as a warning when structural validation confirms that escaping is correct.
+
+If a tool is missing, times out, emits invalid output, or exits unexpectedly, the candidate receives a warning by default. With `--require-tools`, the same condition is fatal. Production generation should use `--require-tools`.
 
 ## Reviewer Gate
 
-Review is enabled by default. After deterministic validation passes, a blinded second-stage reviewer sees:
+Review runs only after deterministic validation passes. The reviewer sees the expected CWE/context and both source versions, but not generator identity, endpoint, prompt metadata, or previous validation output.
 
-- requested CWE and context,
-- vulnerable code,
-- fixed code.
-
-The reviewer must return strict JSON:
+It must return exactly these fields:
 
 ```json
 {
@@ -154,36 +216,41 @@ The reviewer must return strict JSON:
 }
 ```
 
-Any `fail`, `unsure`, malformed JSON, inconsistent fields, or reviewer-provider error rejects the attempt. Reviewer prompts and raw responses are not exported to VUDENC files or metadata sidecars.
+Allowed verdicts are `pass`, `fail`, and `unsure`; allowed reason categories are `none`, `wrong_cwe`, `incomplete_fix`, `wrong_context`, `runtime_issue`, and `other`. A pass is valid only when all booleans are true and the category is `none`. Any schema error, inconsistency, non-pass verdict, or provider error rejects the attempt.
 
-By default, the reviewer reuses the generation provider. `--review-provider` can override this with `mock`, `openai_compatible`, or `local_http`, using the `SYNVUL_REVIEW_*` environment variables.
+Accepted records store only the parsed assessment plus reviewer provider/model when available. Reviewer prompts and raw responses are not persisted. `--no-review` writes an explicit skipped review state and is intended only for diagnostics.
 
-`--no-review` is for diagnostics only. It should not be used for production training data.
+## Duplicate Policy
 
-## Duplicate Rejection
+Duplicate checks index the combined vulnerable/fixed pair in this order:
 
-`DiversityIndex` indexes the vulnerable/fixed pair, not only the vulnerable file. Rejection order is:
+1. exact SHA-256 of newline-normalized source pairs, across all CWEs;
+2. exact fingerprint of both ASTs after normalizing names and literals, across all CWEs;
+3. same-CWE Jaccard similarity of normalized token 5-grams, rejected at `>= 0.90`.
 
-1. exact normalized code-pair hash,
-2. exact normalized-AST pair fingerprint,
-3. same-CWE token-shingle near duplicate at Jaccard similarity `>= 0.90`.
+Rejected duplicate records include the safe check name and matched sample/CWE/mode, plus threshold and similarity for near duplicates.
 
-The shingle index uses normalized token 5-grams over vulnerable code, a fixed-code separator, and fixed code. Identifiers and literals are normalized while Python keywords and operators are preserved.
+## Concurrency, Exit Status, And Outputs
 
-Duplicate diagnostics are stored in rejected records using safe structured fields: check type, matched sample id/CWE/mode, threshold, and similarity score when relevant.
+Each planned slot runs in a thread up to `min(--workers, planned slots)`. File appends, sample-id allocation, duplicate indexing, and coverage counters are protected by a shared lock. Accepted IDs use the next numeric suffix after retained accepted records; rejected attempts can reuse a prospective ID because only accepted records advance the sequence.
 
-## Failure Behavior
+Exit behavior:
 
-If any planned quota slot remains unfilled after `--max-attempts`, generation writes all accepted records and audit files but exits with status `1`. This is intentional. It prevents a partial dataset from looking like a complete target run.
+- `0`: every selected target is met and, when enabled, final export verification passes;
+- `1`: at least one quota remains unfilled or final verification fails;
+- `2`: provider preflight or command-line configuration error.
 
-The most useful files after a run are:
+A normal exported run produces:
 
 ```text
-samples.jsonl
-rejected.jsonl
-diversity_summary.json
-dataset_verification.json
-vudenc/
+<output>/
+  samples.jsonl
+  rejected.jsonl
+  diversity_summary.json
+  dataset_verification.json
+  vudenc/
+    metadata.jsonl
+    plain_<mode>
 ```
 
-Use `rejected.jsonl` to identify whether failures are mostly provider quality, structural mismatch, analyzer findings, review failures, or duplicate rejection.
+With `--no-export`, `vudenc/` and `dataset_verification.json` are not rebuilt. See [Dataset Format And Verification](dataset.md) for the record and export contracts.
