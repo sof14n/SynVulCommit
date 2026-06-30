@@ -118,17 +118,6 @@ Detailed documentation:
 ## Notes On Mock Mode
 
 The mock provider exists for parser and pipeline tests. It does not represent final dataset quality and is not a substitute for real provider generation. Because the production planner now enforces context-specific quota slots, static mock fixtures can become stale when validation rules change. Real production runs should use an actual provider plus strict validation and review.
-
-## Report And Submission
-
-The Lab 5 instructions require:
-
-- an ACM-style research paper prepared in Overleaf,
-- the Overleaf project shared with the instructors by July 1, 2026,
-- code uploaded to GitHub and the repository link shared by July 1, 2026.
-
-Report sources are in [report/acm_submission.tex](report/acm_submission.tex). The supporting body and references are split into [report/paper_body.tex](report/paper_body.tex) and [report/references.tex](report/references.tex). Figures are in [report/images](report/images).
-
 GitHub repository link:
 
 ```text
