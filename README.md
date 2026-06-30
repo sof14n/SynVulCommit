@@ -103,7 +103,6 @@ synvulcommit/rules/           SynVulCommit Semgrep rules for the seven CWE modes
 tests/                        Unit and integration-style tests
 scripts/                      Report figure generation helpers
 docs/                         Detailed documentation
-report/                       Lab report LaTeX sources and figures
 requirements.txt              Generator and validation dependencies
 requirements-experiments.txt  Model evaluation dependencies
 project_desciption.txt        Original project proposal/description
