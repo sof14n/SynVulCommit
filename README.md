@@ -217,7 +217,6 @@ synvulcommit/                  Generation, validation, export, verification, and
 synvulcommit/rules/            Semgrep rules for the seven supported modes
 tests/                         Unit, analyzer integration, pipeline, and optional live-review tests
 docs/                          Detailed generation, dataset, and experiment documentation
-scripts/make_report_figures.py Historical report-figure helper; requires local outputs not committed here
 requirements.txt              Generator and validation dependencies
 requirements-experiments.txt  Optional model-evaluation dependencies
 project_desciption.txt        Original proposal (historical, not the current behavior contract)
